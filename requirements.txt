@@ -1,4 +1,10 @@
+flet==0.25.2
 pyautogui==0.9.54
+pynput>=1.7.6
 Pillow>=10.0.0
 requests>=2.31.0
-pystray>=0.19.5
+cryptography>=43.0.0
+imageio>=2.34
+imageio-ffmpeg>=0.5
+numpy>=1.26
+psutil>=5.9

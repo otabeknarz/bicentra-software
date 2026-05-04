@@ -10,7 +10,7 @@ from PIL import Image
 
 # Safety: move mouse to top-left corner to abort
 pyautogui.FAILSAFE = True
-pyautogui.PAUSE = 0.1
+pyautogui.PAUSE = 0.02
 
 
 def take_screenshot() -> tuple[str, int, int]:
@@ -20,6 +20,14 @@ def take_screenshot() -> tuple[str, int, int]:
     screenshot.save(buffer, format="PNG")
     b64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
     return b64, screenshot.width, screenshot.height
+
+
+def take_screenshot_bytes() -> tuple[bytes, int, int]:
+    """Take a screenshot and return (raw_png_bytes, width, height)."""
+    screenshot = pyautogui.screenshot()
+    buffer = io.BytesIO()
+    screenshot.save(buffer, format="PNG")
+    return buffer.getvalue(), screenshot.width, screenshot.height
 
 
 def get_active_window_title() -> str:
@@ -48,13 +56,25 @@ def get_active_window_title() -> str:
 def execute_action(action: dict) -> None:
     """Execute a single action from the backend."""
     action_type = action.get("action_type", "")
-    delay = action.get("delay", 0.3)
+    delay = action.get("delay", 0)
 
     if delay > 0:
         time.sleep(delay)
 
     x = action.get("x")
     y = action.get("y")
+
+    # Safety net: if x/y look like percentages (0-1), convert to pixels using current screen size
+    screen_w, screen_h = pyautogui.size()
+    if x is not None and isinstance(x, float) and 0 <= x <= 1:
+        x = int(x * screen_w)
+    if y is not None and isinstance(y, float) and 0 <= y <= 1:
+        y = int(y * screen_h)
+    # Or use explicit x_pct / y_pct if pixel coords are missing
+    if x is None and action.get("x_pct") is not None:
+        x = int(float(action["x_pct"]) * screen_w)
+    if y is None and action.get("y_pct") is not None:
+        y = int(float(action["y_pct"]) * screen_h)
 
     if action_type == "click":
         if x is not None and y is not None:
@@ -81,6 +101,11 @@ def execute_action(action: dict) -> None:
         keys = action.get("keys", [])
         if keys:
             pyautogui.hotkey(*keys)
+
+    elif action_type == "key":
+        key = action.get("key", "")
+        if key:
+            pyautogui.press(key)
 
     elif action_type == "scroll":
         scroll_amount = action.get("scroll_amount", 0)
