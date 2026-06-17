@@ -363,3 +363,134 @@ class BicentraAPI:
         except requests.RequestException as e:
             logger.error(f"upload_session_video failed: {e}")
             return False
+
+    # ──────────── Bicentra AI Workflows ────────────
+    def create_workflow(self, prompt: str):
+        """POST /api/workflows/ — kicks off planning. Returns (workflow_dict, error_str).
+
+        The planner runs synchronously inside the request; the response carries
+        the proposed plan ready for user review."""
+        url = f"{self.base_url}/api/workflows/"
+        logger.debug(f"POST {url}")
+        try:
+            resp = self.session.post(
+                url, json={"prompt": prompt}, headers=self._headers(), timeout=60
+            )
+        except requests.RequestException as exc:
+            return None, f"Network error: {exc}"
+        self._log_request("POST", url, resp.status_code, resp.text)
+        if resp.status_code == 201:
+            return resp.json(), None
+        return None, f"{resp.status_code} — {resp.text[:500]}"
+
+    def get_workflow(self, workflow_id: str):
+        url = f"{self.base_url}/api/workflows/{workflow_id}/"
+        logger.debug(f"GET {url}")
+        try:
+            resp = self.session.get(url, headers=self._headers(), timeout=20)
+        except requests.RequestException as exc:
+            logger.error(f"get_workflow failed: {exc}")
+            return None
+        self._log_request("GET", url, resp.status_code, resp.text)
+        return resp.json() if resp.status_code == 200 else None
+
+    def list_workflows(self, page: int = 1, page_size: int = 25) -> dict:
+        url = f"{self.base_url}/api/workflows/"
+        try:
+            resp = self.session.get(
+                url,
+                params={"page": page, "page_size": page_size},
+                headers=self._headers(),
+                timeout=20,
+            )
+        except requests.RequestException as exc:
+            logger.error(f"list_workflows failed: {exc}")
+            return {"results": [], "count": 0, "next": None, "previous": None}
+        self._log_request("GET", url, resp.status_code, resp.text)
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, list):
+                return {"results": data, "count": len(data), "next": None, "previous": None}
+            return data
+        return {"results": [], "count": 0, "next": None, "previous": None}
+
+    def approve_workflow(self, workflow_id: str):
+        url = f"{self.base_url}/api/workflows/{workflow_id}/approve/"
+        try:
+            resp = self.session.post(url, headers=self._headers(), timeout=15)
+        except requests.RequestException as exc:
+            return None, f"Network error: {exc}"
+        self._log_request("POST", url, resp.status_code, resp.text)
+        if resp.status_code == 200:
+            return resp.json(), None
+        return None, f"{resp.status_code} — {resp.text[:500]}"
+
+    def cancel_workflow(self, workflow_id: str) -> bool:
+        url = f"{self.base_url}/api/workflows/{workflow_id}/cancel/"
+        try:
+            resp = self.session.post(url, headers=self._headers(), timeout=15)
+        except requests.RequestException as exc:
+            logger.error(f"cancel_workflow failed: {exc}")
+            return False
+        self._log_request("POST", url, resp.status_code, resp.text)
+        return resp.status_code == 200
+
+    def post_workflow_step_result(
+        self, workflow_id: str, step_id: str, status: str, result: dict | None = None, error: str = ""
+    ) -> bool:
+        """Tell the backend a delegated step finished on the desktop. status is
+        'completed' or 'failed'."""
+        url = (
+            f"{self.base_url}/api/workflows/{workflow_id}"
+            f"/steps/{step_id}/desktop-result/"
+        )
+        payload = {"status": status, "result": result or {}, "error": error}
+        try:
+            resp = self.session.post(
+                url, json=payload, headers=self._headers(), timeout=15
+            )
+        except requests.RequestException as exc:
+            logger.error(f"post_workflow_step_result failed: {exc}")
+            return False
+        self._log_request("POST", url, resp.status_code, resp.text)
+        return resp.status_code == 200
+
+    def stream_workflow_events(self, workflow_id: str):
+        """Yield SSE event dicts {kind, ...payload}. Blocks until the stream
+        closes or the server-side workflow finishes. Caller runs this in a
+        thread and dispatches events to the UI."""
+        import json
+
+        url = f"{self.base_url}/api/workflows/{workflow_id}/events/"
+        try:
+            resp = self.session.get(
+                url, headers=self._headers(), stream=True, timeout=(15, None)
+            )
+        except requests.RequestException as exc:
+            logger.error(f"stream_workflow_events open failed: {exc}")
+            return
+        if resp.status_code != 200:
+            self._log_request("GET", url, resp.status_code, resp.text[:300])
+            return
+        try:
+            for raw in resp.iter_lines(decode_unicode=True):
+                if not raw:
+                    continue
+                # SSE comments (": keepalive") arrive intact — skip them
+                if raw.startswith(":"):
+                    continue
+                if raw.startswith("data:"):
+                    payload = raw[len("data:") :].strip()
+                    if not payload:
+                        continue
+                    try:
+                        yield json.loads(payload)
+                    except json.JSONDecodeError as exc:
+                        logger.warning(f"workflow SSE bad JSON: {exc} | {payload[:200]}")
+        except requests.RequestException as exc:
+            logger.warning(f"stream_workflow_events closed: {exc}")
+        finally:
+            try:
+                resp.close()
+            except Exception:
+                pass

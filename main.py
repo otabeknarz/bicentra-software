@@ -254,11 +254,24 @@ class MainView:
         self.history_query: str = ""
         self._history_search_handle = None
 
+        # AI Workflow state
+        self.workflow: dict | None = None     # latest workflow detail dict
+        self._workflow_sse_thread = None      # background SSE consumer
+        self._workflow_step_threads: list = []  # background run_flow runners
+        self.ai_prompt_field: ft.TextField | None = None
+        self.ai_submit_btn: ft.ElevatedButton | None = None
+        self.ai_plan_column: ft.Column | None = None
+        self.ai_run_btn: ft.ElevatedButton | None = None
+        self.ai_cancel_btn: ft.ElevatedButton | None = None
+        self.ai_steps_column: ft.Column | None = None
+        self.ai_status_text: ft.Text | None = None
+
         # ── Widgets (will build on build()) ──
         # Header / sidebar
         self.sidebar_container: ft.Container | None = None
         self.nav_buttons: dict[str, ft.Container] = {}
         # Page containers
+        self.ai_container: ft.Container | None = None
         self.run_container: ft.Container | None = None
         self.record_container: ft.Container | None = None
         self.manage_container: ft.Container | None = None
@@ -311,12 +324,14 @@ class MainView:
         self.sidebar_container = self._build_sidebar()
 
         # Build all page contents (only the active one is visible at a time)
+        self.ai_container = self._build_ai_tab()
         self.run_container = self._build_run_tab()
         self.record_container = self._build_record_tab()
         self.manage_container = self._build_manage_tab()
         self.history_container = self._build_history_tab()
         self.settings_container = self._build_settings_tab()
         # Initial visibility — Run is the home page
+        self.ai_container.visible = False
         self.record_container.visible = False
         self.manage_container.visible = False
         self.history_container.visible = False
@@ -325,6 +340,7 @@ class MainView:
         body_content = ft.Container(
             content=ft.Column(
                 [
+                    self.ai_container,
                     self.run_container,
                     self.record_container,
                     self.manage_container,
@@ -408,6 +424,7 @@ class MainView:
     # Sidebar
     # ─────────────────────────────────────────────────────────
     _NAV_ITEMS = [
+        ("ai", "AI Workflow", ft.Icons.AUTO_AWESOME_OUTLINED),
         ("run", "Run", ft.Icons.PLAY_ARROW_OUTLINED),
         ("record", "Record", ft.Icons.FIBER_MANUAL_RECORD_OUTLINED),
         ("manage", "Manage", ft.Icons.LIST_ALT_OUTLINED),
@@ -488,6 +505,7 @@ class MainView:
     def _on_nav_change(self, key: str):
         self._active_page = key
         # Toggle visibility
+        self.ai_container.visible = key == "ai"
         self.run_container.visible = key == "run"
         self.record_container.visible = key == "record"
         self.manage_container.visible = key == "manage"
@@ -506,6 +524,434 @@ class MainView:
             self._load_history_async()
         elif key == "settings":
             self._refresh_settings_status()
+
+    # ─────────────────────────────────────────────────────────
+    # AI Workflow tab — natural-language prompt → plan → run
+    # ─────────────────────────────────────────────────────────
+    def _build_ai_tab(self) -> ft.Container:
+        self.ai_prompt_field = ui.text_field(
+            label="What should Bicentra AI do?",
+            hint="e.g. Find Sardor Utabekov in PioneerRx, call him, send SMS if no answer",
+            multiline=True,
+            min_lines=3,
+            max_lines=6,
+        )
+        self.ai_submit_btn = ui.primary_button(
+            "Plan workflow",
+            on_click=lambda e: self._on_ai_submit(),
+            icon=ft.Icons.AUTO_AWESOME,
+        )
+
+        # Plan review panel — visible only after planning succeeds
+        self.ai_plan_column = ft.Column(spacing=ui.SPACE_2)
+        self.ai_run_btn = ui.primary_button(
+            "Run plan",
+            on_click=lambda e: self._on_ai_approve(),
+            icon=ft.Icons.PLAY_ARROW,
+            disabled=True,
+        )
+        self.ai_cancel_btn = ui.destructive_button(
+            "Cancel",
+            on_click=lambda e: self._on_ai_cancel(),
+            icon=ft.Icons.STOP,
+            disabled=True,
+        )
+
+        # Live step log — populated by SSE events
+        self.ai_steps_column = ft.Column(spacing=ui.SPACE_1)
+        self.ai_status_text = ft.Text(
+            "Type a request above to get started.",
+            size=ui.FONT_BASE,
+            color=ui.TEXT_MUTED,
+        )
+
+        return ft.Container(
+            content=ft.Column(
+                [
+                    ft.Text(
+                        "Bicentra AI",
+                        size=ui.FONT_XL,
+                        weight=ft.FontWeight.W_700,
+                        color=ui.TEXT_PRIMARY,
+                    ),
+                    ui.muted(
+                        "Describe a task in plain language. The AI will draft a "
+                        "plan; you approve it before anything runs.",
+                        size=ui.FONT_BASE,
+                    ),
+                    ft.Container(height=ui.SPACE_3),
+                    self.ai_prompt_field,
+                    ft.Container(height=ui.SPACE_2),
+                    ft.Row(
+                        [self.ai_submit_btn],
+                        alignment=ft.MainAxisAlignment.START,
+                    ),
+                    ft.Container(height=ui.SPACE_4),
+                    ui.caption("Plan"),
+                    ft.Container(height=ui.SPACE_1),
+                    self.ai_plan_column,
+                    ft.Container(height=ui.SPACE_3),
+                    ft.Row(
+                        [self.ai_run_btn, self.ai_cancel_btn],
+                        spacing=ui.SPACE_2,
+                    ),
+                    ft.Container(height=ui.SPACE_4),
+                    ui.caption("Steps"),
+                    ft.Container(height=ui.SPACE_1),
+                    self.ai_status_text,
+                    self.ai_steps_column,
+                ],
+                spacing=0,
+            ),
+        )
+
+    def _on_ai_submit(self):
+        prompt = (self.ai_prompt_field.value or "").strip()
+        if len(prompt) < 3:
+            self._ai_set_status("Please type a longer request.", error=True)
+            return
+        self.ai_submit_btn.disabled = True
+        self.ai_submit_btn.text = "Planning…"
+        self.ai_plan_column.controls.clear()
+        self.ai_plan_column.controls.append(ui.loading_state("Asking Bicentra AI…"))
+        self.ai_run_btn.disabled = True
+        self.ai_cancel_btn.disabled = True
+        self.ai_steps_column.controls.clear()
+        self._ai_set_status("Planning…")
+        self.page.update()
+
+        def fetch():
+            workflow, error = self.api.create_workflow(prompt)
+            if workflow:
+                self.workflow = workflow
+                self._render_plan(workflow)
+            else:
+                self._ai_set_status(f"Planning failed: {error or 'unknown error'}", error=True)
+                self.ai_plan_column.controls.clear()
+            self.ai_submit_btn.disabled = False
+            self.ai_submit_btn.text = "Plan workflow"
+            self.page.update()
+
+        threading.Thread(target=fetch, daemon=True).start()
+
+    def _render_plan(self, workflow: dict):
+        self.ai_plan_column.controls.clear()
+        plan = (workflow or {}).get("plan") or {}
+        summary = plan.get("summary") or "(no summary)"
+        steps = plan.get("steps") or []
+
+        if workflow.get("status") == "failed":
+            err = workflow.get("error_message") or "Planner failed."
+            self.ai_plan_column.controls.append(
+                ui.muted(f"⚠ {err}", size=ui.FONT_BASE)
+            )
+            self._ai_set_status("Planner couldn't build a plan.", error=True)
+            return
+
+        self.ai_plan_column.controls.append(
+            ft.Text(summary, size=ui.FONT_MD, color=ui.TEXT_PRIMARY)
+        )
+        if not steps:
+            self.ai_plan_column.controls.append(
+                ui.muted("(Empty plan — nothing to run.)", size=ui.FONT_BASE)
+            )
+            self._ai_set_status("Plan has no steps.", error=True)
+            return
+
+        for i, step in enumerate(steps, start=1):
+            self.ai_plan_column.controls.append(self._build_plan_step_card(i, step))
+        self._ai_set_status(f"Plan ready — {len(steps)} steps. Review and click Run plan.")
+        self.ai_run_btn.disabled = False
+
+    def _build_plan_step_card(self, idx: int, step: dict) -> ft.Container:
+        tool = step.get("tool") or "?"
+        why = step.get("why") or ""
+        condition = step.get("condition")
+
+        body = ft.Column(
+            [
+                ft.Row(
+                    [
+                        ft.Container(
+                            content=ft.Text(
+                                str(idx),
+                                size=ui.FONT_XS,
+                                weight=ft.FontWeight.W_700,
+                                color=ui.ACCENT,
+                            ),
+                            width=22,
+                            height=22,
+                            bgcolor=ui.ACCENT_SUBTLE,
+                            border_radius=ui.RADIUS_FULL,
+                            alignment=ft.alignment.center,
+                        ),
+                        ft.Text(
+                            tool,
+                            size=ui.FONT_MD,
+                            weight=ft.FontWeight.W_600,
+                            color=ui.TEXT_PRIMARY,
+                        ),
+                    ],
+                    spacing=ui.SPACE_2,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                ft.Text(why, size=ui.FONT_BASE, color=ui.TEXT_SECONDARY),
+            ],
+            spacing=ui.SPACE_1,
+            tight=True,
+        )
+        if condition:
+            body.controls.append(
+                ui.chip(f"if: {condition}", variant="warning")
+            )
+        return ft.Container(
+            content=body,
+            padding=ui.SPACE_3,
+            bgcolor=ui.SURFACE,
+            border=ft.border.all(1, ui.BORDER),
+            border_radius=ui.RADIUS_MD,
+        )
+
+    def _on_ai_approve(self):
+        if not self.workflow:
+            return
+        workflow_id = self.workflow["id"]
+        self.ai_run_btn.disabled = True
+        self.ai_cancel_btn.disabled = False
+        self.ai_steps_column.controls.clear()
+        self._ai_set_status("Starting…")
+        self.page.update()
+
+        def go():
+            updated, error = self.api.approve_workflow(workflow_id)
+            if not updated:
+                self._ai_set_status(f"Approve failed: {error}", error=True)
+                self.ai_run_btn.disabled = False
+                self.ai_cancel_btn.disabled = True
+                self.page.update()
+                return
+            self.workflow = updated
+            self._start_workflow_event_stream(workflow_id)
+
+        threading.Thread(target=go, daemon=True).start()
+
+    def _on_ai_cancel(self):
+        if not self.workflow:
+            return
+        workflow_id = self.workflow["id"]
+        self._ai_set_status("Cancelling…")
+        self.page.update()
+
+        def go():
+            ok = self.api.cancel_workflow(workflow_id)
+            if not ok:
+                self._ai_set_status("Cancel request failed.", error=True)
+            # The SSE stream will deliver a workflow_cancelled event;
+            # _handle_workflow_event() resets the UI.
+
+        threading.Thread(target=go, daemon=True).start()
+
+    def _start_workflow_event_stream(self, workflow_id: str):
+        """Open the SSE stream in a daemon thread and dispatch events."""
+
+        def consume():
+            for event in self.api.stream_workflow_events(workflow_id):
+                try:
+                    self._handle_workflow_event(workflow_id, event)
+                except Exception as exc:
+                    logger.error(f"workflow event handler crashed: {exc}", exc_info=True)
+
+        self._workflow_sse_thread = threading.Thread(target=consume, daemon=True)
+        self._workflow_sse_thread.start()
+
+    def _handle_workflow_event(self, workflow_id: str, event: dict):
+        kind = event.get("kind")
+        if kind == "hello":
+            self._ai_set_status(f"Connected. Status: {event.get('status')}")
+        elif kind == "workflow_started":
+            self._ai_set_status("Running…")
+        elif kind == "step_started":
+            self._ai_log_step(event, status="running")
+        elif kind == "step_completed":
+            self._ai_log_step(event, status="completed")
+        elif kind == "step_failed":
+            self._ai_log_step(event, status="failed")
+        elif kind == "step_skipped":
+            self._ai_log_step(event, status="skipped")
+        elif kind == "desktop_action_required":
+            self._ai_log_step(event, status="desktop")
+            self._handle_desktop_action(workflow_id, event)
+        elif kind == "workflow_completed":
+            self._ai_set_status("✓ Workflow completed.")
+            self.ai_run_btn.disabled = False
+            self.ai_cancel_btn.disabled = True
+        elif kind == "workflow_failed":
+            err = event.get("error") or "Unknown error"
+            self._ai_set_status(f"✗ Workflow failed: {err}", error=True)
+            self.ai_run_btn.disabled = False
+            self.ai_cancel_btn.disabled = True
+        elif kind == "workflow_cancelled":
+            self._ai_set_status("Workflow cancelled.")
+            self.ai_run_btn.disabled = False
+            self.ai_cancel_btn.disabled = True
+        else:
+            logger.debug(f"Unhandled workflow event: {kind}")
+        self.page.update()
+
+    _AI_STATUS_LABELS = {
+        "running": ("●", ui.ACCENT),
+        "completed": ("✓", ui.SUCCESS),
+        "failed": ("✗", ui.ERROR),
+        "skipped": ("—", ui.TEXT_MUTED),
+        "desktop": ("⌨", ui.WARNING),
+    }
+
+    def _ai_log_step(self, event: dict, status: str):
+        idx = event.get("index", "?")
+        tool = event.get("tool", "?")
+        reason = event.get("reason", "")
+        result = event.get("result")
+        error = event.get("error")
+
+        marker, color = self._AI_STATUS_LABELS.get(status, ("·", ui.TEXT_MUTED))
+        head = ft.Row(
+            [
+                ft.Text(marker, size=ui.FONT_MD, color=color, weight=ft.FontWeight.W_700),
+                ft.Text(
+                    f"Step {idx} · {tool}",
+                    size=ui.FONT_BASE,
+                    weight=ft.FontWeight.W_600,
+                    color=ui.TEXT_PRIMARY,
+                ),
+            ],
+            spacing=ui.SPACE_2,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+        body_children = [head]
+        if reason:
+            body_children.append(
+                ft.Text(reason, size=ui.FONT_BASE, color=ui.TEXT_SECONDARY)
+            )
+        if status == "failed" and error:
+            body_children.append(
+                ft.Text(f"⚠ {error[:200]}", size=ui.FONT_BASE, color=ui.ERROR)
+            )
+        if status == "completed" and isinstance(result, dict) and result:
+            preview = ", ".join(
+                f"{k}={str(v)[:40]}" for k, v in list(result.items())[:4]
+            )
+            body_children.append(
+                ft.Text(preview, size=ui.FONT_XS, color=ui.TEXT_MUTED)
+            )
+
+        self.ai_steps_column.controls.append(
+            ft.Container(
+                content=ft.Column(body_children, spacing=ui.SPACE_1, tight=True),
+                padding=ui.SPACE_3,
+                bgcolor=ui.SURFACE,
+                border=ft.border.all(1, ui.BORDER),
+                border_radius=ui.RADIUS_MD,
+            )
+        )
+
+    def _ai_set_status(self, text: str, error: bool = False):
+        self.ai_status_text.value = text
+        self.ai_status_text.color = ui.ERROR if error else ui.TEXT_MUTED
+
+    def _handle_desktop_action(self, workflow_id: str, event: dict):
+        """Backend asked us to run a flow. Spin off the existing flow runner
+        but POST its result back to the workflow callback when it finishes."""
+        tool = event.get("tool")
+        if tool != "run_flow":
+            logger.warning(f"Unsupported desktop_action_required tool: {tool}")
+            return
+        step_id = event.get("step_id")
+        pms = event.get("pms")
+        flow_name = event.get("flow_name")
+        flow_inputs = event.get("inputs") or {}
+        desktop_session_id = event.get("desktop_session_id")
+        if not all([step_id, pms, flow_name, desktop_session_id]):
+            logger.warning(f"desktop_action_required missing fields: {event}")
+            return
+
+        # Run the desktop flow in a worker thread (reuses the existing
+        # session-based runner but with the pre-created session_id).
+        t = threading.Thread(
+            target=self._run_workflow_flow_step,
+            args=(workflow_id, step_id, pms, flow_name, flow_inputs, desktop_session_id),
+            daemon=True,
+        )
+        t.start()
+        self._workflow_step_threads.append(t)
+
+    def _run_workflow_flow_step(
+        self,
+        workflow_id: str,
+        step_id: str,
+        pms: str,
+        flow_name: str,
+        flow_inputs: dict,
+        desktop_session_id: str,
+    ):
+        """Run a pre-created DesktopSession to completion (reuses the same
+        next_step → execute_action loop the Run tab uses) and report the
+        outcome back to the workflow API."""
+        import pyautogui
+
+        screen_w, screen_h = pyautogui.size()
+        result: dict = {"steps_executed": 0, "session_id": desktop_session_id}
+        step = 0
+        try:
+            while True:
+                step += 1
+                api_result = self.api.next_step(
+                    desktop_session_id, screen_width=screen_w, screen_height=screen_h
+                )
+                if api_result is None:
+                    raise RuntimeError("next_step returned None — session may have ended")
+
+                action_type = api_result.get("action_type", "failed")
+                if action_type == "done":
+                    result["steps_executed"] = step - 1
+                    result["final_reason"] = api_result.get("reason", "")
+                    self.api.post_workflow_step_result(
+                        workflow_id, step_id, "completed", result=result
+                    )
+                    return
+                if action_type == "failed":
+                    self.api.post_workflow_step_result(
+                        workflow_id, step_id, "failed",
+                        result=result,
+                        error=api_result.get("reason", "Flow failed"),
+                    )
+                    return
+
+                try:
+                    execute_action(api_result)
+                except Exception as exc:
+                    self.api.post_workflow_step_result(
+                        workflow_id, step_id, "failed",
+                        result={**result, "steps_executed": step},
+                        error=f"execute_action: {exc}",
+                    )
+                    return
+
+                if step >= config.MAX_STEPS:
+                    self.api.cancel_session(desktop_session_id)
+                    self.api.post_workflow_step_result(
+                        workflow_id, step_id, "failed",
+                        result={**result, "steps_executed": step},
+                        error="Max steps reached",
+                    )
+                    return
+                time.sleep(config.SCREENSHOT_INTERVAL)
+        except Exception as exc:
+            logger.error(f"workflow flow step runner crashed: {exc}", exc_info=True)
+            self.api.post_workflow_step_result(
+                workflow_id, step_id, "failed",
+                result=result,
+                error=f"Runner crashed: {exc}",
+            )
 
     # ─────────────────────────────────────────────────────────
     # Run tab — search-based flow selector + form
