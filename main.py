@@ -222,7 +222,8 @@ class MainView:
 
         # Navigation
         self._active_page = "run"
-        self._sidebar_expanded = True
+        # Sidebar is fully hidden by default — hamburger reveals it
+        self._sidebar_open = False
 
         # State for flows
         self.flows: list[dict] = []
@@ -421,7 +422,6 @@ class MainView:
             self.nav_buttons[key] = btn
             items.append(btn)
 
-        width = 220 if self._sidebar_expanded else 64
         return ft.Container(
             content=ft.Column(
                 items,
@@ -429,10 +429,10 @@ class MainView:
                 expand=True,
             ),
             padding=ft.padding.symmetric(horizontal=ui.SPACE_2, vertical=ui.SPACE_3),
-            width=width,
+            width=220,
             bgcolor=ui.SURFACE,
             border=ft.border.only(right=ft.BorderSide(1, ui.BORDER)),
-            animate=ft.Animation(180, ft.AnimationCurve.EASE_OUT),
+            visible=self._sidebar_open,
         )
 
     def _build_nav_item(self, key: str, label: str, icon: str) -> ft.Container:
@@ -440,22 +440,17 @@ class MainView:
         bg = ui.ACCENT_SUBTLE if is_active else "transparent"
         fg = ui.ACCENT if is_active else ui.TEXT_SECONDARY
 
-        row_controls: list[ft.Control] = [
-            ft.Icon(icon, size=18, color=fg),
-        ]
-        if self._sidebar_expanded:
-            row_controls.append(
-                ft.Text(
-                    label,
-                    size=ui.FONT_MD,
-                    color=fg,
-                    weight=ft.FontWeight.W_500 if is_active else ft.FontWeight.W_400,
-                )
-            )
-
         return ft.Container(
             content=ft.Row(
-                row_controls,
+                [
+                    ft.Icon(icon, size=18, color=fg),
+                    ft.Text(
+                        label,
+                        size=ui.FONT_MD,
+                        color=fg,
+                        weight=ft.FontWeight.W_500 if is_active else ft.FontWeight.W_400,
+                    ),
+                ],
                 spacing=ui.SPACE_3,
                 alignment=ft.MainAxisAlignment.START,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -464,7 +459,6 @@ class MainView:
             bgcolor=bg,
             border_radius=ui.RADIUS_MD,
             on_click=lambda e, k=key: self._on_nav_change(k),
-            tooltip=label if not self._sidebar_expanded else None,
             ink=True,
         )
 
@@ -472,7 +466,7 @@ class MainView:
         """Re-render sidebar contents in place (after toggle or nav change)."""
         if not self.sidebar_container:
             return
-        # Rebuild children
+        # Rebuild nav buttons so the active highlight follows _active_page
         self.nav_buttons.clear()
         items = []
         for key, label, icon in self._NAV_ITEMS:
@@ -484,11 +478,11 @@ class MainView:
             spacing=ui.SPACE_1,
             expand=True,
         )
-        self.sidebar_container.width = 220 if self._sidebar_expanded else 64
+        self.sidebar_container.visible = self._sidebar_open
         self.page.update()
 
     def _toggle_sidebar(self):
-        self._sidebar_expanded = not self._sidebar_expanded
+        self._sidebar_open = not self._sidebar_open
         self._refresh_sidebar()
 
     def _on_nav_change(self, key: str):
@@ -506,7 +500,9 @@ class MainView:
             self._load_history_async()
         elif key == "settings":
             self._refresh_settings_status()
-        # Refresh sidebar to update active highlight
+        # Auto-close the sidebar after navigation so it doesn't linger
+        self._sidebar_open = False
+        # Refresh sidebar to update active highlight + visibility
         self._refresh_sidebar()
 
     # ─────────────────────────────────────────────────────────
