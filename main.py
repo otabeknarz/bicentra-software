@@ -256,15 +256,20 @@ class MainView:
 
         # AI Workflow state
         self.workflow: dict | None = None     # latest workflow detail dict
+        self.workflow_readonly: bool = False  # True when viewing a past workflow
         self._workflow_sse_thread = None      # background SSE consumer
         self._workflow_step_threads: list = []  # background run_flow runners
+        self.ai_workflows: list[dict] = []    # recent workflow history rows
         self.ai_prompt_field: ft.TextField | None = None
         self.ai_submit_btn: ft.ElevatedButton | None = None
+        self.ai_new_btn: ft.ElevatedButton | None = None
         self.ai_plan_column: ft.Column | None = None
         self.ai_run_btn: ft.ElevatedButton | None = None
         self.ai_cancel_btn: ft.ElevatedButton | None = None
         self.ai_steps_column: ft.Column | None = None
         self.ai_status_text: ft.Text | None = None
+        self.ai_history_column: ft.Column | None = None
+        self.ai_history_status: ft.Text | None = None
 
         # ── Widgets (will build on build()) ──
         # Header / sidebar
@@ -518,7 +523,9 @@ class MainView:
         # race with the visibility flip and the new tab renders empty.
         self._refresh_sidebar()
         # Lazy loads per page (after visibility has been committed)
-        if key == "manage":
+        if key == "ai":
+            self._load_workflow_history_async()
+        elif key == "manage":
             self._load_managed_flows()
         elif key == "history":
             self._load_history_async()
@@ -541,6 +548,12 @@ class MainView:
             on_click=lambda e: self._on_ai_submit(),
             icon=ft.Icons.AUTO_AWESOME,
         )
+        self.ai_new_btn = ui.secondary_button(
+            "New workflow",
+            on_click=lambda e: self._on_ai_new(),
+            icon=ft.Icons.ADD,
+        )
+        self.ai_new_btn.visible = False  # appears once a workflow exists
 
         # Plan review panel — visible only after planning succeeds
         self.ai_plan_column = ft.Column(spacing=ui.SPACE_2)
@@ -565,14 +578,27 @@ class MainView:
             color=ui.TEXT_MUTED,
         )
 
+        # Recent workflows ledger (last 10) — clickable to load read-only
+        self.ai_history_column = ft.Column(spacing=ui.SPACE_1)
+        self.ai_history_status = ft.Text(
+            "", size=ui.FONT_XS, color=ui.TEXT_MUTED,
+        )
+
         return ft.Container(
             content=ft.Column(
                 [
-                    ft.Text(
-                        "Bicentra AI",
-                        size=ui.FONT_XL,
-                        weight=ft.FontWeight.W_700,
-                        color=ui.TEXT_PRIMARY,
+                    ft.Row(
+                        [
+                            ft.Text(
+                                "Bicentra AI",
+                                size=ui.FONT_XL,
+                                weight=ft.FontWeight.W_700,
+                                color=ui.TEXT_PRIMARY,
+                            ),
+                            ft.Container(expand=True),
+                            self.ai_new_btn,
+                        ],
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
                     ),
                     ui.muted(
                         "Describe a task in plain language. The AI will draft a "
@@ -600,16 +626,38 @@ class MainView:
                     ft.Container(height=ui.SPACE_1),
                     self.ai_status_text,
                     self.ai_steps_column,
+                    ft.Container(height=ui.SPACE_5),
+                    ui.divider(),
+                    ft.Container(height=ui.SPACE_3),
+                    ft.Row(
+                        [
+                            ui.caption("Recent workflows"),
+                            ft.Container(expand=True),
+                            self.ai_history_status,
+                        ],
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    ft.Container(height=ui.SPACE_2),
+                    self.ai_history_column,
                 ],
                 spacing=0,
             ),
         )
 
     def _on_ai_submit(self):
+        # Block while a workflow is mid-run — operator must Cancel or wait
+        if self.workflow and self.workflow.get("status") == "running":
+            self._ai_set_status(
+                "A workflow is already running. Cancel it or wait for completion.",
+                error=True,
+            )
+            self.page.update()
+            return
         prompt = (self.ai_prompt_field.value or "").strip()
         if len(prompt) < 3:
             self._ai_set_status("Please type a longer request.", error=True)
             return
+        self.workflow_readonly = False
         self.ai_submit_btn.disabled = True
         self.ai_submit_btn.text = "Planning…"
         self.ai_plan_column.controls.clear()
@@ -624,7 +672,10 @@ class MainView:
             workflow, error = self.api.create_workflow(prompt)
             if workflow:
                 self.workflow = workflow
+                self.ai_new_btn.visible = True
                 self._render_plan(workflow)
+                # Refresh the history list so the new row shows up
+                self._load_workflow_history_async()
             else:
                 self._ai_set_status(f"Planning failed: {error or 'unknown error'}", error=True)
                 self.ai_plan_column.controls.clear()
@@ -751,15 +802,32 @@ class MainView:
 
         threading.Thread(target=go, daemon=True).start()
 
+    _AI_TERMINAL_KINDS = {
+        "workflow_completed", "workflow_failed", "workflow_cancelled",
+    }
+
     def _start_workflow_event_stream(self, workflow_id: str):
-        """Open the SSE stream in a daemon thread and dispatch events."""
+        """Open the SSE stream in a daemon thread and dispatch events. The
+        consumer stops iterating after a terminal event so the thread exits
+        cleanly and the HTTP connection releases via the generator's finally."""
 
         def consume():
-            for event in self.api.stream_workflow_events(workflow_id):
+            stream = self.api.stream_workflow_events(workflow_id)
+            try:
+                for event in stream:
+                    try:
+                        self._handle_workflow_event(workflow_id, event)
+                    except Exception as exc:
+                        logger.error(
+                            f"workflow event handler crashed: {exc}", exc_info=True
+                        )
+                    if event.get("kind") in self._AI_TERMINAL_KINDS:
+                        break
+            finally:
                 try:
-                    self._handle_workflow_event(workflow_id, event)
-                except Exception as exc:
-                    logger.error(f"workflow event handler crashed: {exc}", exc_info=True)
+                    stream.close()
+                except Exception:
+                    pass
 
         self._workflow_sse_thread = threading.Thread(target=consume, daemon=True)
         self._workflow_sse_thread.start()
@@ -783,20 +851,28 @@ class MainView:
             self._handle_desktop_action(workflow_id, event)
         elif kind == "workflow_completed":
             self._ai_set_status("✓ Workflow completed.")
-            self.ai_run_btn.disabled = False
-            self.ai_cancel_btn.disabled = True
+            self._ai_finish_run(local_status="completed")
         elif kind == "workflow_failed":
             err = event.get("error") or "Unknown error"
             self._ai_set_status(f"✗ Workflow failed: {err}", error=True)
-            self.ai_run_btn.disabled = False
-            self.ai_cancel_btn.disabled = True
+            self._ai_finish_run(local_status="failed")
         elif kind == "workflow_cancelled":
             self._ai_set_status("Workflow cancelled.")
-            self.ai_run_btn.disabled = False
-            self.ai_cancel_btn.disabled = True
+            self._ai_finish_run(local_status="cancelled")
         else:
             logger.debug(f"Unhandled workflow event: {kind}")
         self.page.update()
+
+    def _ai_finish_run(self, local_status: str):
+        """Common cleanup once a workflow reaches a terminal state."""
+        if self.workflow is not None:
+            self.workflow["status"] = local_status
+        # Past workflow view: keep run/cancel disabled; otherwise allow re-running
+        # by submitting a new prompt.
+        self.ai_run_btn.disabled = True
+        self.ai_cancel_btn.disabled = True
+        self.ai_new_btn.visible = True
+        self._load_workflow_history_async()
 
     _AI_STATUS_LABELS = {
         "running": ("●", ui.ACCENT),
@@ -857,6 +933,184 @@ class MainView:
     def _ai_set_status(self, text: str, error: bool = False):
         self.ai_status_text.value = text
         self.ai_status_text.color = ui.ERROR if error else ui.TEXT_MUTED
+
+    # ── workflow lifecycle helpers ───────────────────────────────────────
+
+    def _on_ai_new(self):
+        """Reset the AI tab so the user can start a fresh workflow.
+        Blocked while a RUNNING workflow is still active — they must
+        Cancel or wait for it to finish first."""
+        if self.workflow and self.workflow.get("status") == "running":
+            self._ai_set_status(
+                "A workflow is still running. Cancel it first.", error=True
+            )
+            self.page.update()
+            return
+        self._reset_ai_state()
+        self._load_workflow_history_async()
+        self.page.update()
+
+    def _reset_ai_state(self):
+        """Wipe the prompt/plan/steps panels back to a blank slate. Does NOT
+        kill the SSE thread — it will exit on its next terminal event read."""
+        self.workflow = None
+        self.workflow_readonly = False
+        self.ai_prompt_field.value = ""
+        self.ai_plan_column.controls.clear()
+        self.ai_steps_column.controls.clear()
+        self.ai_status_text.value = "Type a request above to get started."
+        self.ai_status_text.color = ui.TEXT_MUTED
+        self.ai_submit_btn.disabled = False
+        self.ai_submit_btn.text = "Plan workflow"
+        self.ai_run_btn.disabled = True
+        self.ai_cancel_btn.disabled = True
+        self.ai_new_btn.visible = False
+
+    # ── history loading + rendering ──────────────────────────────────────
+
+    def _load_workflow_history_async(self):
+        if self.ai_history_column is None:
+            return
+        self.ai_history_status.value = "Loading…"
+        self.page.update()
+
+        def fetch():
+            data = self.api.list_workflows(page=1, page_size=10)
+            self.ai_workflows = data.get("results") or []
+            self._render_workflow_history()
+
+        threading.Thread(target=fetch, daemon=True).start()
+
+    def _render_workflow_history(self):
+        self.ai_history_column.controls.clear()
+        if not self.ai_workflows:
+            self.ai_history_status.value = ""
+            self.ai_history_column.controls.append(
+                ui.muted("No past workflows yet.", size=ui.FONT_BASE)
+            )
+            self.page.update()
+            return
+
+        self.ai_history_status.value = (
+            f"{len(self.ai_workflows)} recent"
+        )
+        for wf in self.ai_workflows:
+            self.ai_history_column.controls.append(self._build_history_row(wf))
+        self.page.update()
+
+    _WORKFLOW_STATUS_COLOR = {
+        "completed": ui.SUCCESS,
+        "failed": ui.ERROR,
+        "cancelled": ui.TEXT_MUTED,
+        "running": ui.ACCENT,
+        "planning": ui.WARNING,
+        "planned": ui.WARNING,
+    }
+
+    def _build_history_row(self, wf: dict) -> ft.Container:
+        prompt = (wf.get("prompt") or "").strip().replace("\n", " ")
+        if len(prompt) > 90:
+            prompt = prompt[:87] + "…"
+        status = wf.get("status") or ""
+        when = (wf.get("created_at") or "")[:19].replace("T", " ")
+        steps_n = wf.get("step_count") or 0
+        color = self._WORKFLOW_STATUS_COLOR.get(status, ui.TEXT_MUTED)
+
+        return ft.Container(
+            content=ft.Column(
+                [
+                    ft.Row(
+                        [
+                            ft.Text(
+                                prompt or "(empty prompt)",
+                                size=ui.FONT_BASE,
+                                color=ui.TEXT_PRIMARY,
+                                weight=ft.FontWeight.W_500,
+                                expand=True,
+                                max_lines=1,
+                                overflow=ft.TextOverflow.ELLIPSIS,
+                            ),
+                            ui.chip(status, variant="neutral"),
+                        ],
+                        spacing=ui.SPACE_2,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    ft.Text(
+                        f"{when} · {steps_n} step{'s' if steps_n != 1 else ''}",
+                        size=ui.FONT_XS,
+                        color=color,
+                    ),
+                ],
+                spacing=ui.SPACE_1,
+                tight=True,
+            ),
+            padding=ui.SPACE_3,
+            bgcolor=ui.SURFACE,
+            border=ft.border.all(1, ui.BORDER),
+            border_radius=ui.RADIUS_MD,
+            on_click=lambda e, w=wf: self._open_history_workflow(w),
+            ink=True,
+        )
+
+    def _open_history_workflow(self, wf: dict):
+        """Load a past workflow into the panel in read-only mode."""
+        if self.workflow and self.workflow.get("status") == "running":
+            self._ai_set_status(
+                "Active workflow still running — cancel before opening another.",
+                error=True,
+            )
+            self.page.update()
+            return
+
+        workflow_id = wf.get("id")
+        if not workflow_id:
+            return
+        self._ai_set_status("Loading workflow…")
+        self.ai_plan_column.controls.clear()
+        self.ai_steps_column.controls.clear()
+        self.page.update()
+
+        def fetch():
+            detail = self.api.get_workflow(workflow_id)
+            if not detail:
+                self._ai_set_status("Failed to load workflow.", error=True)
+                self.page.update()
+                return
+            self.workflow = detail
+            self.workflow_readonly = True
+            self.ai_prompt_field.value = detail.get("prompt") or ""
+            self._render_plan(detail)
+            self._render_workflow_steps(detail.get("steps") or [])
+            # Read-only — disable run/cancel + show "New workflow" to escape
+            self.ai_run_btn.disabled = True
+            self.ai_cancel_btn.disabled = True
+            self.ai_new_btn.visible = True
+            status = detail.get("status") or ""
+            self._ai_set_status(f"Viewing past workflow · status: {status}")
+            self.page.update()
+
+        threading.Thread(target=fetch, daemon=True).start()
+
+    def _render_workflow_steps(self, steps: list[dict]):
+        """Replay finished step rows from a past workflow into the live log."""
+        self.ai_steps_column.controls.clear()
+        for step in steps:
+            event = {
+                "index": step.get("index"),
+                "tool": step.get("tool_name"),
+                "reason": step.get("reason", ""),
+                "result": step.get("result") or {},
+                "error": step.get("error") or "",
+            }
+            status_map = {
+                "completed": "completed",
+                "failed": "failed",
+                "skipped": "skipped",
+                "awaiting_desktop": "desktop",
+                "running": "running",
+                "pending": "running",
+            }
+            self._ai_log_step(event, status=status_map.get(step.get("status"), "running"))
 
     def _handle_desktop_action(self, workflow_id: str, event: dict):
         """Backend asked us to run a flow. Spin off the existing flow runner
