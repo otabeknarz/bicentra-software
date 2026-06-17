@@ -42,6 +42,7 @@ from recorder import Recorder
 import windows as win_mod
 import system_info as sysinfo
 import settings_store
+import ui
 
 PMS_OPTIONS = [
     ("pioneer_rx", "PioneerRx"),
@@ -219,11 +220,14 @@ class MainView:
         self.api = api
         self.on_logout = on_logout
 
-        # Shared PMS
-        self.pms_value = "pioneer_rx"
+        # Navigation
+        self._active_page = "run"
+        self._sidebar_expanded = True
 
         # State for flows
         self.flows: list[dict] = []
+        self.flow_search_text = ""
+        self.selected_flow: dict | None = None
         self.running = False
         self.session_id: str | None = None
         # In-memory cache of (step_number, png_bytes) for slideshow video
@@ -250,8 +254,10 @@ class MainView:
         self._history_search_handle = None
 
         # ── Widgets (will build on build()) ──
-        self.pms_dropdown: ft.Dropdown | None = None
-        self.tab_selector: ft.SegmentedButton | None = None
+        # Header / sidebar
+        self.sidebar_container: ft.Container | None = None
+        self.nav_buttons: dict[str, ft.Container] = {}
+        # Page containers
         self.run_container: ft.Container | None = None
         self.record_container: ft.Container | None = None
         self.manage_container: ft.Container | None = None
@@ -273,8 +279,9 @@ class MainView:
         self._about_copy_btn: ft.OutlinedButton | None = None
 
         # Run tab widgets
-        self.flow_dropdown: ft.Dropdown | None = None
-        self.flow_desc: ft.Text | None = None
+        self.flow_search_field: ft.TextField | None = None
+        self.flow_list_column: ft.Column | None = None  # search results
+        self.flow_form_panel: ft.Container | None = None  # selected flow form
         self.inputs_column: ft.Column | None = None
         self.input_fields: dict[str, ft.Control] = {}  # any widget with .value
         self.run_btn: ft.ElevatedButton | None = None
@@ -282,8 +289,12 @@ class MainView:
         self.status_text: ft.Text | None = None
         self.log_view: ft.ListView | None = None
         self.copy_btn: ft.IconButton | None = None
+        self.run_idle_view: ft.Container | None = None  # shown when no flow selected
+        self.run_active_view: ft.Container | None = None  # shown when flow selected
 
         # Record tab widgets
+        self.rec_pms: ft.Dropdown | None = None  # PMS picker lives inside Record tab now
+        self.rec_pms_value: str = PMS_OPTIONS[0][0] if PMS_OPTIONS else "pioneer_rx"
         self.rec_name: ft.TextField | None = None
         self.rec_display: ft.TextField | None = None
         self.rec_desc: ft.TextField | None = None
@@ -295,72 +306,24 @@ class MainView:
     # Build
     # ─────────────────────────────────────────────────────────
     def build(self) -> ft.Control:
-        # Header
-        header = ft.Container(
-            content=ft.Row(
-                [
-                    ft.Text("Bicentra Desktop", size=20, weight=ft.FontWeight.BOLD),
-                    ft.Container(expand=True),
-                    ft.Text(self.api.email or "", size=12, color="#6b7280"),
-                    ft.Container(width=8),
-                    ft.ElevatedButton(
-                        "Log out", height=32,
-                        on_click=lambda e: self._logout(),
-                        style=ft.ButtonStyle(
-                            bgcolor="#f3f4f6", color="#dc2626",
-                            shape=ft.RoundedRectangleBorder(radius=6),
-                        ),
-                    ),
-                ],
-                alignment=ft.MainAxisAlignment.START,
-            ),
-            padding=ft.padding.symmetric(horizontal=20, vertical=16),
-            bgcolor="white",
-            border=ft.border.only(bottom=ft.BorderSide(1, "#e5e7eb")),
-        )
+        header = self._build_header()
+        self.sidebar_container = self._build_sidebar()
 
-        # PMS dropdown
-        self.pms_dropdown = ft.Dropdown(
-            label="PMS Software",
-            value=self.pms_value,
-            options=[ft.dropdown.Option(key=k, text=label) for k, label in PMS_OPTIONS],
-            on_change=self._on_pms_change,
-            border_radius=8,
-            height=48,
-        )
-
-        # Tab switcher
-        self.tab_selector = ft.SegmentedButton(
-            selected={"run"},
-            allow_multiple_selection=False,
-            on_change=self._on_tab_change,
-            segments=[
-                ft.Segment(value="run", label=ft.Text("Run"), icon=ft.Icon(ft.Icons.PLAY_ARROW)),
-                ft.Segment(value="record", label=ft.Text("Record"), icon=ft.Icon(ft.Icons.FIBER_MANUAL_RECORD, color="#dc2626")),
-                ft.Segment(value="manage", label=ft.Text("Manage"), icon=ft.Icon(ft.Icons.LIST)),
-                ft.Segment(value="history", label=ft.Text("History"), icon=ft.Icon(ft.Icons.HISTORY)),
-                ft.Segment(value="settings", label=ft.Text("Settings"), icon=ft.Icon(ft.Icons.SETTINGS)),
-            ],
-        )
-
-        # Build all tab contents
+        # Build all page contents (only the active one is visible at a time)
         self.run_container = self._build_run_tab()
         self.record_container = self._build_record_tab()
         self.manage_container = self._build_manage_tab()
         self.history_container = self._build_history_tab()
         self.settings_container = self._build_settings_tab()
+        # Initial visibility — Run is the home page
         self.record_container.visible = False
         self.manage_container.visible = False
         self.history_container.visible = False
         self.settings_container.visible = False
 
-        body = ft.Container(
+        body_content = ft.Container(
             content=ft.Column(
                 [
-                    self.pms_dropdown,
-                    ft.Container(height=8),
-                    self.tab_selector,
-                    ft.Container(height=12),
                     self.run_container,
                     self.record_container,
                     self.manage_container,
@@ -369,91 +332,546 @@ class MainView:
                 ],
                 spacing=0,
                 scroll=ft.ScrollMode.AUTO,
+                expand=True,
             ),
-            padding=ft.padding.symmetric(horizontal=20, vertical=16),
+            padding=ft.padding.symmetric(horizontal=ui.SPACE_5, vertical=ui.SPACE_4),
+            expand=True,
+            bgcolor=ui.BG,
+        )
+
+        # Header sits at the top; sidebar + content sit in a row below it
+        main_row = ft.Row(
+            [self.sidebar_container, body_content],
+            spacing=0,
             expand=True,
         )
 
-        return ft.Column([header, body], spacing=0, expand=True)
+        return ft.Column([header, main_row], spacing=0, expand=True)
 
     # ─────────────────────────────────────────────────────────
-    # Run tab
+    # Header
+    # ─────────────────────────────────────────────────────────
+    def _build_header(self) -> ft.Container:
+        hamburger = ui.icon_button(
+            icon=ft.Icons.MENU,
+            on_click=lambda e: self._toggle_sidebar(),
+            tooltip="Toggle menu",
+            size=20,
+            color=ui.TEXT_SECONDARY,
+        )
+        logo = ft.Image(
+            src="/bicentra-logo.svg",
+            height=24,
+            fit=ft.ImageFit.CONTAIN,
+            error_content=ft.Text(
+                "Bicentra",
+                size=ui.FONT_LG,
+                weight=ft.FontWeight.W_700,
+                color=ui.TEXT_PRIMARY,
+            ),
+        )
+
+        email_text = ft.Text(
+            self.api.email or "",
+            size=ui.FONT_BASE,
+            color=ui.TEXT_MUTED,
+        )
+
+        logout_btn = ui.ghost_button(
+            text="Logout",
+            on_click=lambda e: self._confirm_logout(),
+            icon=ft.Icons.LOGOUT,
+            color=ui.TEXT_SECONDARY,
+        )
+
+        return ft.Container(
+            content=ft.Row(
+                [
+                    hamburger,
+                    ft.Container(width=ui.SPACE_2),
+                    logo,
+                    ft.Container(expand=True),
+                    email_text,
+                    ft.Container(width=ui.SPACE_3),
+                    logout_btn,
+                ],
+                alignment=ft.MainAxisAlignment.START,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            padding=ft.padding.symmetric(horizontal=ui.SPACE_4, vertical=ui.SPACE_2),
+            bgcolor=ui.SURFACE,
+            border=ft.border.only(bottom=ft.BorderSide(1, ui.BORDER)),
+        )
+
+    # ─────────────────────────────────────────────────────────
+    # Sidebar
+    # ─────────────────────────────────────────────────────────
+    _NAV_ITEMS = [
+        ("run", "Run", ft.Icons.PLAY_ARROW_OUTLINED),
+        ("record", "Record", ft.Icons.FIBER_MANUAL_RECORD_OUTLINED),
+        ("manage", "Manage", ft.Icons.LIST_ALT_OUTLINED),
+        ("history", "History", ft.Icons.HISTORY),
+        ("settings", "Settings", ft.Icons.SETTINGS_OUTLINED),
+    ]
+
+    def _build_sidebar(self) -> ft.Container:
+        items = []
+        for key, label, icon in self._NAV_ITEMS:
+            btn = self._build_nav_item(key, label, icon)
+            self.nav_buttons[key] = btn
+            items.append(btn)
+
+        width = 220 if self._sidebar_expanded else 64
+        return ft.Container(
+            content=ft.Column(
+                items,
+                spacing=ui.SPACE_1,
+                expand=True,
+            ),
+            padding=ft.padding.symmetric(horizontal=ui.SPACE_2, vertical=ui.SPACE_3),
+            width=width,
+            bgcolor=ui.SURFACE,
+            border=ft.border.only(right=ft.BorderSide(1, ui.BORDER)),
+            animate=ft.Animation(180, ft.AnimationCurve.EASE_OUT),
+        )
+
+    def _build_nav_item(self, key: str, label: str, icon: str) -> ft.Container:
+        is_active = key == self._active_page
+        bg = ui.ACCENT_SUBTLE if is_active else "transparent"
+        fg = ui.ACCENT if is_active else ui.TEXT_SECONDARY
+
+        row_controls: list[ft.Control] = [
+            ft.Icon(icon, size=18, color=fg),
+        ]
+        if self._sidebar_expanded:
+            row_controls.append(
+                ft.Text(
+                    label,
+                    size=ui.FONT_MD,
+                    color=fg,
+                    weight=ft.FontWeight.W_500 if is_active else ft.FontWeight.W_400,
+                )
+            )
+
+        return ft.Container(
+            content=ft.Row(
+                row_controls,
+                spacing=ui.SPACE_3,
+                alignment=ft.MainAxisAlignment.START,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            padding=ft.padding.symmetric(horizontal=ui.SPACE_3, vertical=ui.SPACE_3),
+            bgcolor=bg,
+            border_radius=ui.RADIUS_MD,
+            on_click=lambda e, k=key: self._on_nav_change(k),
+            tooltip=label if not self._sidebar_expanded else None,
+            ink=True,
+        )
+
+    def _refresh_sidebar(self):
+        """Re-render sidebar contents in place (after toggle or nav change)."""
+        if not self.sidebar_container:
+            return
+        # Rebuild children
+        self.nav_buttons.clear()
+        items = []
+        for key, label, icon in self._NAV_ITEMS:
+            btn = self._build_nav_item(key, label, icon)
+            self.nav_buttons[key] = btn
+            items.append(btn)
+        self.sidebar_container.content = ft.Column(
+            items,
+            spacing=ui.SPACE_1,
+            expand=True,
+        )
+        self.sidebar_container.width = 220 if self._sidebar_expanded else 64
+        self.page.update()
+
+    def _toggle_sidebar(self):
+        self._sidebar_expanded = not self._sidebar_expanded
+        self._refresh_sidebar()
+
+    def _on_nav_change(self, key: str):
+        self._active_page = key
+        # Toggle visibility
+        self.run_container.visible = key == "run"
+        self.record_container.visible = key == "record"
+        self.manage_container.visible = key == "manage"
+        self.history_container.visible = key == "history"
+        self.settings_container.visible = key == "settings"
+        # Lazy loads per page
+        if key == "manage":
+            self._load_managed_flows()
+        elif key == "history":
+            self._load_history_async()
+        elif key == "settings":
+            self._refresh_settings_status()
+        # Refresh sidebar to update active highlight
+        self._refresh_sidebar()
+
+    # ─────────────────────────────────────────────────────────
+    # Run tab — search-based flow selector + form
     # ─────────────────────────────────────────────────────────
     def _build_run_tab(self) -> ft.Container:
-        self.flow_dropdown = ft.Dropdown(
-            label="Flow",
-            options=[ft.dropdown.Option(key="loading", text="Loading...")],
-            value="loading",
-            on_change=self._on_flow_change,
-            border_radius=8,
-            height=48,
+        # Search field
+        self.flow_search_field = ui.text_field(
+            hint="Search flows by name or description…",
+            prefix_icon=ft.Icons.SEARCH,
+            on_change=self._on_flow_search_change,
+            height=44,
         )
-        self.flow_desc = ft.Text("", size=11, color="#6b7280")
-        self.inputs_column = ft.Column(spacing=8)
 
-        self.run_btn = ft.ElevatedButton(
-            "▶  Run Flow", expand=True, height=40,
+        # Empty state placeholder for the list area
+        self.flow_list_column = ft.Column(spacing=ui.SPACE_2)
+
+        # Idle view: shown when no flow selected
+        self.run_idle_view = ft.Container(
+            content=ft.Column(
+                [
+                    self.flow_search_field,
+                    ft.Container(height=ui.SPACE_3),
+                    self.flow_list_column,
+                ],
+                spacing=0,
+            ),
+            visible=True,
+        )
+
+        # Active view widgets (form + run controls) — built lazily on flow select
+        self.inputs_column = ft.Column(spacing=ui.SPACE_3)
+
+        self.run_btn = ui.primary_button(
+            "Run flow",
             on_click=lambda e: self._start_run(),
-            style=ft.ButtonStyle(
-                bgcolor="#16a34a", color="white",
-                shape=ft.RoundedRectangleBorder(radius=8),
-            ),
+            icon=ft.Icons.PLAY_ARROW,
+            expand=True,
         )
-        self.stop_btn = ft.ElevatedButton(
-            "■  Stop", expand=True, height=40, disabled=True,
+        self.stop_btn = ui.destructive_button(
+            "Stop",
             on_click=lambda e: self._stop_run(),
-            style=ft.ButtonStyle(
-                bgcolor="#dc2626", color="white",
-                shape=ft.RoundedRectangleBorder(radius=8),
-            ),
+            icon=ft.Icons.STOP,
+            disabled=True,
         )
 
-        self.status_text = ft.Text("Ready", size=12, color="#6b7280")
+        self.status_text = ft.Text("Ready", size=ui.FONT_BASE, color=ui.TEXT_MUTED)
         self.log_view = ft.ListView(
             spacing=2,
-            height=240,
+            height=200,
             auto_scroll=True,
-            padding=ft.padding.all(8),
+            padding=ft.padding.all(ui.SPACE_2),
         )
         self.copy_btn = ft.IconButton(
             icon=ft.Icons.CONTENT_COPY,
             tooltip="Copy logs",
             on_click=lambda e: self._copy_logs(),
             visible=config.DEBUG,
+            icon_size=16,
+            icon_color=ui.TEXT_MUTED,
+        )
+
+        # The active view is built by _render_active_flow_view() — start empty
+        self.flow_form_panel = ft.Column(spacing=0)
+        self.run_active_view = ft.Container(
+            content=self.flow_form_panel,
+            visible=False,
         )
 
         return ft.Container(
             content=ft.Column(
                 [
-                    self.flow_dropdown,
-                    ft.Container(height=4),
-                    self.flow_desc,
-                    ft.Container(height=8),
-                    self.inputs_column,
-                    ft.Container(height=12),
-                    ft.Row([self.run_btn, self.stop_btn], spacing=8),
-                    ft.Container(height=8),
-                    self.status_text,
-                    ft.Row([
-                        ft.Text("Logs", size=11, weight=ft.FontWeight.BOLD, color="#6b7280"),
-                        ft.Container(expand=True),
-                        self.copy_btn,
-                    ]),
-                    ft.Container(
-                        content=self.log_view,
-                        bgcolor="#f9fafb",
-                        border_radius=8,
-                        border=ft.border.all(1, "#e5e7eb"),
-                    ),
+                    self.run_idle_view,
+                    self.run_active_view,
                 ],
                 spacing=0,
             ),
         )
 
+    def _render_flow_list(self):
+        """Re-render the flow list based on the current search query."""
+        if not self.flow_list_column:
+            return
+        self.flow_list_column.controls.clear()
+
+        if not self.flows:
+            # Empty state — no flows at all
+            self.flow_list_column.controls.append(
+                ui.empty_state(
+                    icon=ft.Icons.PLAY_CIRCLE_OUTLINE,
+                    title="No flows yet",
+                    description="Record a flow in the Record tab to get started.",
+                )
+            )
+            self.page.update()
+            return
+
+        # Filter by search text
+        q = (self.flow_search_text or "").lower().strip()
+        if q:
+            matching = [
+                f for f in self.flows
+                if q in (f.get("display_name") or "").lower()
+                or q in (f.get("name") or "").lower()
+                or q in (f.get("description") or "").lower()
+            ]
+        else:
+            matching = list(self.flows)
+
+        if not matching:
+            self.flow_list_column.controls.append(
+                ui.empty_state(
+                    icon=ft.Icons.SEARCH_OFF,
+                    title="No matches",
+                    description=f"No flows match \"{self.flow_search_text}\".",
+                )
+            )
+            self.page.update()
+            return
+
+        for flow in matching:
+            self.flow_list_column.controls.append(self._build_flow_card(flow))
+        self.page.update()
+
+    def _build_flow_card(self, flow: dict) -> ft.Container:
+        """A single clickable flow card in the search list."""
+        name = flow.get("display_name") or flow.get("name") or "Untitled flow"
+        desc = flow.get("description") or ""
+        pms = flow.get("pms") or flow.get("pms_software") or ""
+        step_count = flow.get("step_count") or len(flow.get("steps", []))
+        source = flow.get("source", "")
+
+        chips_row = ft.Row(spacing=ui.SPACE_2)
+        if pms:
+            pms_label = dict(PMS_OPTIONS).get(pms, pms)
+            chips_row.controls.append(ui.chip(pms_label, variant="info"))
+        if step_count:
+            chips_row.controls.append(
+                ui.chip(f"{step_count} step{'s' if step_count != 1 else ''}", variant="neutral")
+            )
+        if source == "yaml":
+            chips_row.controls.append(ui.chip("YAML", variant="accent"))
+
+        content_col = ft.Column(
+            [
+                ft.Text(
+                    name,
+                    size=ui.FONT_MD,
+                    weight=ft.FontWeight.W_600,
+                    color=ui.TEXT_PRIMARY,
+                ),
+            ],
+            spacing=ui.SPACE_1,
+            tight=True,
+        )
+        if desc:
+            content_col.controls.append(
+                ft.Text(
+                    desc,
+                    size=ui.FONT_BASE,
+                    color=ui.TEXT_MUTED,
+                    max_lines=2,
+                    overflow=ft.TextOverflow.ELLIPSIS,
+                )
+            )
+        content_col.controls.append(chips_row)
+
+        return ft.Container(
+            content=content_col,
+            padding=ui.SPACE_3,
+            bgcolor=ui.SURFACE,
+            border=ft.border.all(1, ui.BORDER),
+            border_radius=ui.RADIUS_MD,
+            on_click=lambda e, f=flow: self._select_flow(f),
+            ink=True,
+        )
+
+    def _on_flow_search_change(self, e):
+        self.flow_search_text = e.control.value or ""
+        self._render_flow_list()
+
+    def _select_flow(self, flow: dict):
+        """Activate a flow — show its form, hide the search list."""
+        self.selected_flow = flow
+        self.input_fields = {}
+        self._build_active_flow_form()
+        self.run_idle_view.visible = False
+        self.run_active_view.visible = True
+        self.page.update()
+
+    def _back_to_flows(self):
+        """Return to the search/list view (only allowed when not running)."""
+        if self.running:
+            return
+        self.selected_flow = None
+        self.run_idle_view.visible = True
+        self.run_active_view.visible = False
+        self.page.update()
+
+    def _build_active_flow_form(self):
+        """Build the form panel for the currently selected flow."""
+        flow = self.selected_flow
+        if not flow:
+            return
+
+        name = flow.get("display_name") or flow.get("name") or "Untitled flow"
+        desc = flow.get("description") or ""
+
+        # Header row: back button + name + chips
+        back_btn = ui.icon_button(
+            icon=ft.Icons.ARROW_BACK,
+            on_click=lambda e: self._back_to_flows(),
+            tooltip="Back to flows",
+            size=18,
+            color=ui.TEXT_SECONDARY,
+        )
+
+        chips_row = ft.Row(spacing=ui.SPACE_2)
+        pms = flow.get("pms") or flow.get("pms_software") or ""
+        if pms:
+            chips_row.controls.append(
+                ui.chip(dict(PMS_OPTIONS).get(pms, pms), variant="info")
+            )
+
+        # Rebuild input fields
+        self.inputs_column.controls.clear()
+        store = _load_input_store()
+        flow_key = f"{pms}::{flow.get('name', '')}"
+        last_values = store.get(flow_key, {})
+
+        inputs = flow.get("inputs", []) or []
+        if not inputs:
+            self.inputs_column.controls.append(
+                ui.muted("This flow has no input variables.", size=ui.FONT_BASE)
+            )
+        else:
+            for inp in inputs:
+                self.inputs_column.controls.append(
+                    self._build_input_widget(inp, last_values)
+                )
+
+        controls_row = ft.Row([self.run_btn, self.stop_btn], spacing=ui.SPACE_2)
+
+        self.flow_form_panel.controls.clear()
+        self.flow_form_panel.controls.extend(
+            [
+                ft.Row(
+                    [
+                        back_btn,
+                        ft.Column(
+                            [
+                                ft.Text(
+                                    name,
+                                    size=ui.FONT_XL,
+                                    weight=ft.FontWeight.W_600,
+                                    color=ui.TEXT_PRIMARY,
+                                ),
+                                chips_row if chips_row.controls else ft.Container(),
+                            ],
+                            spacing=ui.SPACE_1,
+                            tight=True,
+                            expand=True,
+                        ),
+                    ],
+                    vertical_alignment=ft.CrossAxisAlignment.START,
+                    spacing=ui.SPACE_2,
+                ),
+                ft.Container(height=ui.SPACE_3),
+                ft.Text(desc, size=ui.FONT_BASE, color=ui.TEXT_SECONDARY)
+                if desc
+                else ft.Container(),
+                ft.Container(height=ui.SPACE_4),
+                ui.caption("Inputs"),
+                ft.Container(height=ui.SPACE_2),
+                self.inputs_column,
+                ft.Container(height=ui.SPACE_4),
+                controls_row,
+                ft.Container(height=ui.SPACE_2),
+                self.status_text,
+                ft.Container(height=ui.SPACE_3),
+                ft.Row(
+                    [
+                        ui.caption("Logs"),
+                        ft.Container(expand=True),
+                        self.copy_btn,
+                    ]
+                ),
+                ft.Container(height=ui.SPACE_1),
+                ft.Container(
+                    content=self.log_view,
+                    bgcolor=ui.SURFACE_SUBTLE,
+                    border_radius=ui.RADIUS_MD,
+                    border=ft.border.all(1, ui.BORDER),
+                ),
+            ]
+        )
+
+    def _build_input_widget(self, inp: dict, last_values: dict) -> ft.Control:
+        """Build a single input widget from a flow input schema entry."""
+        name = inp.get("name", "")
+        label = inp.get("label", name)
+        placeholder = inp.get("placeholder", "")
+        required = inp.get("required", False)
+        inp_type = inp.get("type", "string")
+        default = inp.get("default", "")
+        initial = last_values.get(name, default)
+        label_text = f"{label}{' *' if required else ''}"
+
+        widget: ft.Control
+        if inp_type == "choice":
+            choices = inp.get("choices", []) or []
+            widget = ft.Dropdown(
+                label=label_text,
+                value=initial if initial in choices else (choices[0] if choices else None),
+                options=[ft.dropdown.Option(key=c, text=c) for c in choices],
+                border_radius=ui.RADIUS_MD,
+                border_color=ui.BORDER,
+                focused_border_color=ui.ACCENT,
+                bgcolor=ui.SURFACE,
+                text_size=ui.FONT_MD,
+                content_padding=ft.padding.symmetric(horizontal=ui.SPACE_3, vertical=ui.SPACE_3),
+            )
+        elif inp_type == "longtext":
+            widget = ui.text_field(
+                label=label_text,
+                hint=placeholder,
+                value=str(initial) if initial else "",
+                multiline=True,
+                min_lines=2,
+                max_lines=5,
+            )
+        elif inp_type == "number":
+            widget = ui.text_field(
+                label=label_text,
+                hint=placeholder,
+                value=str(initial) if initial else "",
+                height=44,
+            )
+        else:  # string
+            widget = ui.text_field(
+                label=label_text,
+                hint=placeholder,
+                value=str(initial) if initial else "",
+                height=44,
+            )
+
+        self.input_fields[name] = widget
+        return widget
+
     # ─────────────────────────────────────────────────────────
     # Record tab
     # ─────────────────────────────────────────────────────────
     def _build_record_tab(self) -> ft.Container:
+        self.rec_pms = ft.Dropdown(
+            label="PMS Software",
+            value=self.rec_pms_value,
+            options=[ft.dropdown.Option(key=k, text=label) for k, label in PMS_OPTIONS],
+            on_change=self._on_rec_pms_change,
+            border_radius=ui.RADIUS_MD,
+            border_color=ui.BORDER,
+            focused_border_color=ui.ACCENT,
+            bgcolor=ui.SURFACE,
+            text_size=ui.FONT_MD,
+            content_padding=ft.padding.symmetric(horizontal=ui.SPACE_3, vertical=ui.SPACE_3),
+        )
         self.rec_name = ft.TextField(
             label="Flow Name (slug)",
             hint_text="create_patient",
@@ -510,6 +928,8 @@ class MainView:
                     size=11, color="#6b7280",
                 ),
                 ft.Container(height=8),
+                self.rec_pms,
+                ft.Container(height=4),
                 self.rec_name,
                 ft.Container(height=4),
                 self.rec_display,
@@ -524,6 +944,9 @@ class MainView:
                 self.rec_event_count,
             ], spacing=0),
         )
+
+    def _on_rec_pms_change(self, e):
+        self.rec_pms_value = e.control.value
 
     # ─────────────────────────────────────────────────────────
     # Manage tab
@@ -683,9 +1106,8 @@ class MainView:
         ok = self.api.delete_flow(flow_id)
         if ok:
             self._load_managed_flows()
-            # Also refresh the Run dropdown if the deleted flow was for the current PMS
-            if flow.get("pms_software") == self.pms_value:
-                self.load_flows_async()
+            # Refresh the Run search list too (in case it was deleted from there)
+            self.load_flows_async()
 
     # ─────────────────────────────────────────────────────────
     # History tab
@@ -924,23 +1346,7 @@ class MainView:
             on_deleted=self._load_history_async,
         ).show()
 
-    # ─────────────────────────────────────────────────────────
-    # Tab switching
-    # ─────────────────────────────────────────────────────────
-    def _on_tab_change(self, e):
-        selected = list(e.control.selected)[0]
-        self.run_container.visible = selected == "run"
-        self.record_container.visible = selected == "record"
-        self.manage_container.visible = selected == "manage"
-        self.history_container.visible = selected == "history"
-        self.settings_container.visible = selected == "settings"
-        if selected == "manage":
-            self._load_managed_flows()
-        if selected == "history":
-            self._load_history_async()
-        if selected == "settings":
-            self._refresh_settings_status()
-        self.page.update()
+    # (Tab switching is now handled by _on_nav_change above.)
 
     # ─────────────────────────────────────────────────────────
     # Settings tab
@@ -1146,128 +1552,92 @@ class MainView:
         self.settings_status.color = "#6b7280"
         self.page.update()
 
-    def _on_pms_change(self, e):
-        self.pms_value = e.control.value
-        self.load_flows_async()
-
     # ─────────────────────────────────────────────────────────
     # Logout
     # ─────────────────────────────────────────────────────────
-    def _logout(self):
+    def _confirm_logout(self):
+        """Open a confirmation dialog before actually logging out."""
         if self.running or self.recording:
+            # Don't allow logout mid-run; show a small dialog
+            dlg = ft.AlertDialog(
+                modal=True,
+                title=ft.Text("Can't sign out right now", size=ui.FONT_LG, weight=ft.FontWeight.W_600),
+                content=ft.Text(
+                    "A flow is currently active. Stop it first, then try again.",
+                    size=ui.FONT_BASE,
+                    color=ui.TEXT_SECONDARY,
+                ),
+                actions=[
+                    ui.ghost_button("OK", lambda e: self._close_dialog(dlg)),
+                ],
+                actions_alignment=ft.MainAxisAlignment.END,
+            )
+            self.page.dialog = dlg
+            dlg.open = True
+            self.page.update()
             return
+
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Sign out?", size=ui.FONT_LG, weight=ft.FontWeight.W_600),
+            content=ft.Text(
+                "You'll need to enter your email and password again to sign back in.",
+                size=ui.FONT_BASE,
+                color=ui.TEXT_SECONDARY,
+            ),
+            actions=[
+                ui.ghost_button("Cancel", lambda e: self._close_dialog(dlg)),
+                ui.destructive_button("Sign out", lambda e: self._do_logout(dlg)),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.dialog = dlg
+        dlg.open = True
+        self.page.update()
+
+    def _close_dialog(self, dlg):
+        dlg.open = False
+        self.page.update()
+
+    def _do_logout(self, dlg):
+        dlg.open = False
+        self.page.update()
         self.api.logout()
         self.on_logout()
+
+    # Back-compat alias (used in a couple of older code paths)
+    def _logout(self):
+        self._confirm_logout()
 
     # ─────────────────────────────────────────────────────────
     # Flow loading
     # ─────────────────────────────────────────────────────────
     def load_flows_async(self):
-        self.flow_dropdown.options = [ft.dropdown.Option(key="loading", text="Loading...")]
-        self.flow_dropdown.value = "loading"
-        self.page.update()
+        """Load the user's saved flows across all PMS (no filter)."""
+        # Show loading placeholder in the list area
+        if self.flow_list_column:
+            self.flow_list_column.controls.clear()
+            self.flow_list_column.controls.append(ui.loading_state("Loading flows…"))
+            self.page.update()
 
         def fetch():
             try:
-                flows = self.api.list_flows(self.pms_value)
+                flows = self.api.list_my_flows()
             except Exception as e:
-                logger.error(f"list_flows failed: {e}")
+                logger.error(f"list_my_flows failed: {e}")
                 flows = []
-            self._populate_flows(flows)
+            # Sort by display name for stable ordering
+            flows = sorted(
+                flows,
+                key=lambda f: (f.get("display_name") or f.get("name") or "").lower(),
+            )
+            self.flows = flows
+            self._render_flow_list()
 
         threading.Thread(target=fetch, daemon=True).start()
 
-    def _populate_flows(self, flows: list[dict]):
-        self.flows = flows
-        if not flows:
-            self.flow_dropdown.options = [ft.dropdown.Option(key="none", text="(No flows available)")]
-            self.flow_dropdown.value = "none"
-            self.flow_desc.value = "No flows yet. Record one in the Record tab."
-            self.inputs_column.controls.clear()
-            self.input_fields = {}
-            self.page.update()
-            return
-
-        opts = []
-        for f in flows:
-            key = f.get("name", "")
-            label = f.get("display_name") or key or "Unnamed"
-            opts.append(ft.dropdown.Option(key=key, text=str(label)))
-
-        self.flow_dropdown.options = opts
-        self.flow_dropdown.value = flows[0].get("name", "")
-        self._on_flow_change(None)
-
     def _selected_flow(self) -> dict | None:
-        key = self.flow_dropdown.value
-        for f in self.flows:
-            if f.get("name") == key:
-                return f
-        return None
-
-    def _on_flow_change(self, e):
-        flow = self._selected_flow()
-        self.input_fields = {}
-        self.inputs_column.controls.clear()
-
-        if not flow:
-            self.flow_desc.value = ""
-            self.page.update()
-            return
-
-        source = flow.get("source", "yaml")
-        desc = flow.get("description", "")
-        prefix = f"[{source}] " if source == "yaml" else ""
-        self.flow_desc.value = prefix + desc
-
-        # Last-used values for this flow (per name + pms)
-        store = _load_input_store()
-        flow_key = f"{flow.get('pms', '')}::{flow.get('name', '')}"
-        last_values = store.get(flow_key, {})
-
-        for inp in flow.get("inputs", []):
-            name = inp.get("name", "")
-            label = inp.get("label", name)
-            placeholder = inp.get("placeholder", "")
-            required = inp.get("required", False)
-            inp_type = inp.get("type", "string")
-            default = inp.get("default", "")
-            initial = last_values.get(name, default)
-            label_text = f"{label}{' *' if required else ''}"
-
-            widget: ft.Control
-            if inp_type == "choice":
-                choices = inp.get("choices", []) or []
-                widget = ft.Dropdown(
-                    label=label_text,
-                    value=initial if initial in choices else (choices[0] if choices else None),
-                    options=[ft.dropdown.Option(key=c, text=c) for c in choices],
-                    border_radius=8, height=48,
-                )
-            elif inp_type == "longtext":
-                widget = ft.TextField(
-                    label=label_text, hint_text=placeholder,
-                    value=str(initial) if initial else "",
-                    multiline=True, min_lines=2, max_lines=5,
-                    border_radius=8,
-                )
-            elif inp_type == "number":
-                widget = ft.TextField(
-                    label=label_text, hint_text=placeholder,
-                    value=str(initial) if initial else "",
-                    keyboard_type=ft.KeyboardType.NUMBER,
-                    border_radius=8, height=44,
-                )
-            else:  # string
-                widget = ft.TextField(
-                    label=label_text, hint_text=placeholder,
-                    value=str(initial) if initial else "",
-                    border_radius=8, height=44,
-                )
-
-            self.input_fields[name] = widget
-            self.inputs_column.controls.append(widget)
-        self.page.update()
+        return self.selected_flow
 
     # ─────────────────────────────────────────────────────────
     # Running a flow
@@ -1459,9 +1829,10 @@ class MainView:
         else:
             self._log(f"⚠ Could not focus {target_app} — flow will run on current screen")
 
+        pms_software = flow.get("pms") or flow.get("pms_software") or ""
         threading.Thread(
             target=self._run_loop,
-            args=(self.pms_value, flow["name"], inputs),
+            args=(pms_software, flow["name"], inputs),
             daemon=True,
         ).start()
 
@@ -1770,7 +2141,7 @@ class MainView:
             "name": (self.rec_name.value or "").strip(),
             "display_name": (self.rec_display.value or "").strip(),
             "description": (self.rec_desc.value or "").strip(),
-            "pms_software": self.pms_value,
+            "pms_software": self.rec_pms_value,
             "screen_width": self.recorder.screen_width,
             "screen_height": self.recorder.screen_height,
             "target_app_name": self.recorder.target_app_name,
@@ -1811,9 +2182,8 @@ class MainView:
         self.rec_status.value = "✓ Flow saved"
         self.rec_status.color = "#16a34a"
         self.rec_event_count.value = ""
-        self.tab_selector.selected = {"run"}
-        self.run_container.visible = True
-        self.record_container.visible = False
+        # Switch to Run page (new sidebar nav)
+        self._on_nav_change("run")
         self.page.update()
         self.load_flows_async()
 
@@ -2481,4 +2851,4 @@ class SessionDetailDialog:
 
 
 if __name__ == "__main__":
-    ft.app(target=main)
+    ft.app(target=main, assets_dir="assets")
