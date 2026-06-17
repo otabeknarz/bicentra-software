@@ -493,17 +493,19 @@ class MainView:
         self.manage_container.visible = key == "manage"
         self.history_container.visible = key == "history"
         self.settings_container.visible = key == "settings"
-        # Lazy loads per page
+        # Auto-close the sidebar after navigation so it doesn't linger
+        self._sidebar_open = False
+        # Flush visibility + sidebar state to the UI in one update before any
+        # lazy loader runs — without this, the lazy loader's page.update() can
+        # race with the visibility flip and the new tab renders empty.
+        self._refresh_sidebar()
+        # Lazy loads per page (after visibility has been committed)
         if key == "manage":
             self._load_managed_flows()
         elif key == "history":
             self._load_history_async()
         elif key == "settings":
             self._refresh_settings_status()
-        # Auto-close the sidebar after navigation so it doesn't linger
-        self._sidebar_open = False
-        # Refresh sidebar to update active highlight + visibility
-        self._refresh_sidebar()
 
     # ─────────────────────────────────────────────────────────
     # Run tab — search-based flow selector + form
@@ -1068,13 +1070,11 @@ class MainView:
         name = flow.get("display_name") or flow.get("name")
 
         def on_delete(e):
-            dlg.open = False
-            self.page.update()
+            self.page.close(dlg)
             threading.Thread(target=self._do_delete, args=(flow,), daemon=True).start()
 
         def close_dlg(e):
-            dlg.open = False
-            self.page.update()
+            self.page.close(dlg)
 
         dlg = ft.AlertDialog(
             modal=True,
@@ -1091,9 +1091,7 @@ class MainView:
                 ),
             ],
         )
-        self.page.dialog = dlg
-        dlg.open = True
-        self.page.update()
+        self.page.open(dlg)
 
     def _do_delete(self, flow: dict):
         flow_id = flow.get("id")
@@ -1568,9 +1566,7 @@ class MainView:
                 ],
                 actions_alignment=ft.MainAxisAlignment.END,
             )
-            self.page.dialog = dlg
-            dlg.open = True
-            self.page.update()
+            self.page.open(dlg)
             return
 
         dlg = ft.AlertDialog(
@@ -1587,17 +1583,13 @@ class MainView:
             ],
             actions_alignment=ft.MainAxisAlignment.END,
         )
-        self.page.dialog = dlg
-        dlg.open = True
-        self.page.update()
+        self.page.open(dlg)
 
     def _close_dialog(self, dlg):
-        dlg.open = False
-        self.page.update()
+        self.page.close(dlg)
 
     def _do_logout(self, dlg):
-        dlg.open = False
-        self.page.update()
+        self.page.close(dlg)
         self.api.logout()
         self.on_logout()
 
@@ -1768,8 +1760,7 @@ class MainView:
             chosen_app = value_holder.get("value", "").strip()
             if not chosen_app:
                 return
-            picker_dlg.open = False
-            self.page.update()
+            self.page.close(picker_dlg)
             self._actually_start_run(flow, inputs, chosen_app)
 
         def on_refresh(e):
@@ -1784,8 +1775,7 @@ class MainView:
                 self.page.update()
 
         def on_cancel(e):
-            picker_dlg.open = False
-            self.page.update()
+            self.page.close(picker_dlg)
 
         picker_dlg = ft.AlertDialog(
             modal=True,
@@ -1817,9 +1807,7 @@ class MainView:
             ],
             actions_alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
         )
-        self.page.dialog = picker_dlg
-        picker_dlg.open = True
-        self.page.update()
+        self.page.open(picker_dlg)
 
     def _actually_start_run(self, flow: dict, inputs: dict, target_app: str):
         """Called after user confirms target app."""
@@ -2167,12 +2155,11 @@ class MainView:
             self.page.update()
 
     def _show_snackbar(self, message: str, color: str = "#2563eb"):
-        self.page.snack_bar = ft.SnackBar(
+        snack = ft.SnackBar(
             content=ft.Text(message, color="white"),
             bgcolor=color,
         )
-        self.page.snack_bar.open = True
-        self.page.update()
+        self.page.open(snack)
 
     # ─────────────────────────────────────────────────────────
     # Review dialog
@@ -2270,15 +2257,11 @@ class ReviewDialog:
             ],
             actions_alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
         )
-        # Flet 0.25 dialog API
-        self.page.dialog = self.dialog
-        self.dialog.open = True
-        self.page.update()
+        self.page.open(self.dialog)
 
     def _close(self):
         if self.dialog:
-            self.dialog.open = False
-            self.page.update()
+            self.page.close(self.dialog)
 
     def _render_steps(self):
         self.steps_column.controls.clear()
@@ -2424,13 +2407,11 @@ class ReviewDialog:
                 input_def["choices"] = choices
             self.inputs_schema.append(input_def)
 
-            var_dlg.open = False
-            self.page.update()
+            self.page.close(var_dlg)
             self._render_steps()
 
         def close_var(e):
-            var_dlg.open = False
-            self.page.update()
+            self.page.close(var_dlg)
 
         var_dlg = ft.AlertDialog(
             modal=True,
@@ -2452,9 +2433,7 @@ class ReviewDialog:
                 ft.ElevatedButton("OK", on_click=on_ok),
             ],
         )
-        self.page.dialog = var_dlg
-        var_dlg.open = True
-        self.page.update()
+        self.page.open(var_dlg)
 
     def _delete_step(self, idx: int):
         del self.steps[idx]
@@ -2473,13 +2452,11 @@ class ReviewDialog:
             q = (text_field.value or "").strip()
             if q:
                 self.steps.append({"action": "ai_verify", "question": q})
-                ai_dlg.open = False
-                self.page.update()
+                self.page.close(ai_dlg)
                 self._render_steps()
 
         def close_ai(e):
-            ai_dlg.open = False
-            self.page.update()
+            self.page.close(ai_dlg)
 
         ai_dlg = ft.AlertDialog(
             modal=True,
@@ -2490,9 +2467,7 @@ class ReviewDialog:
                 ft.ElevatedButton("Add", on_click=on_ok),
             ],
         )
-        self.page.dialog = ai_dlg
-        ai_dlg.open = True
-        self.page.update()
+        self.page.open(ai_dlg)
 
     def _update_inputs_label(self):
         if self.inputs_schema:
@@ -2535,8 +2510,7 @@ class ReviewDialog:
                 self.save_btn.text = "💾 Save Flow"
 
                 def close_err(e):
-                    err_dlg.open = False
-                    self.page.update()
+                    self.page.close(err_dlg)
 
                 err_dlg = ft.AlertDialog(
                     modal=True,
@@ -2544,9 +2518,7 @@ class ReviewDialog:
                     content=ft.Text(str(error)),
                     actions=[ft.TextButton("OK", on_click=close_err)],
                 )
-                self.page.dialog = err_dlg
-                err_dlg.open = True
-                self.page.update()
+                self.page.open(err_dlg)
 
         threading.Thread(target=do_save, daemon=True).start()
 
@@ -2593,9 +2565,7 @@ class SessionDetailDialog:
                                  alignment=ft.alignment.center),
             actions=[ft.TextButton("Cancel", on_click=lambda e: self._close())],
         )
-        self.page.dialog = self.dialog
-        self.dialog.open = True
-        self.page.update()
+        self.page.open(self.dialog)
 
         def fetch():
             try:
@@ -2609,8 +2579,7 @@ class SessionDetailDialog:
 
     def _close(self):
         if self.dialog:
-            self.dialog.open = False
-            self.page.update()
+            self.page.close(self.dialog)
 
     def _render(self):
         if not self.detail:
@@ -2785,12 +2754,10 @@ class SessionDetailDialog:
                         ),
                         actions=[ft.TextButton(
                             "OK",
-                            on_click=lambda e: (setattr(info, "open", False), self.page.update()),
+                            on_click=lambda e: self.page.close(info),
                         )],
                     )
-                    self.page.dialog = info
-                    info.open = True
-                    self.page.update()
+                    self.page.open(info)
             except Exception as exc:
                 logger.error(f"share_session failed: {exc}")
 
@@ -2814,12 +2781,10 @@ class SessionDetailDialog:
                     content=ft.Text(f"Saved to: {target}", size=11, selectable=True),
                     actions=[ft.TextButton(
                         "OK",
-                        on_click=lambda e: (setattr(info, "open", False), self.page.update()),
+                        on_click=lambda e: self.page.close(info),
                     )],
                 )
-                self.page.dialog = info
-                info.open = True
-                self.page.update()
+                self.page.open(info)
             except Exception as exc:
                 logger.error(f"export_session failed: {exc}")
 
@@ -2827,8 +2792,7 @@ class SessionDetailDialog:
 
     def _delete(self):
         def do_confirm_delete(e):
-            confirm.open = False
-            self.page.update()
+            self.page.close(confirm)
 
             def do_delete():
                 try:
@@ -2842,8 +2806,7 @@ class SessionDetailDialog:
             threading.Thread(target=do_delete, daemon=True).start()
 
         def cancel_delete(e):
-            confirm.open = False
-            self.page.update()
+            self.page.close(confirm)
 
         confirm = ft.AlertDialog(
             modal=True,
@@ -2857,9 +2820,7 @@ class SessionDetailDialog:
                 ),
             ],
         )
-        self.page.dialog = confirm
-        confirm.open = True
-        self.page.update()
+        self.page.open(confirm)
 
 
 if __name__ == "__main__":
