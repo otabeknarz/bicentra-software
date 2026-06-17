@@ -36,7 +36,7 @@ def _save_input_store(store: dict):
     except Exception:
         pass
 from api_client import BicentraAPI
-from automation import take_screenshot, take_screenshot_bytes, get_active_window_title, execute_action
+from automation import take_screenshot_bytes, execute_action
 from video import build_slideshow
 from recorder import Recorder
 import windows as win_mod
@@ -1260,7 +1260,7 @@ class MainView:
 
         for session in results:
             sid = session.get("id", "")
-            display = session.get("flow_display_name") or session.get("flow_name") or "Free-form"
+            display = session.get("flow_display_name") or session.get("flow_name") or "Untitled flow"
             pms = pms_labels.get(session.get("pms_software", ""), session.get("pms_software", ""))
             status = session.get("status", "")
             duration_ms = session.get("duration_ms")
@@ -1946,21 +1946,8 @@ class MainView:
             if not self.running or result is None:
                 break
 
-            if result.get("needs_screenshot"):
-                self._status(f"Step {step} — Screenshot for AI...", "#7c3aed")
-                sb64, w, h = take_screenshot()
-                aw = get_active_window_title()
-                self._debug_log(f"AI screenshot: {w}x{h} | {aw}")
-                result = self.api.next_step(
-                    self.session_id,
-                    screenshot_b64=sb64, screen_width=w, screen_height=h, active_window=aw,
-                )
-                if result is None:
-                    break
-
             action_type = result.get("action_type", "failed")
             reason = result.get("reason", "")
-            observation = result.get("ai_observation", "")
             action_id = result.get("id")
             action_step = result.get("step_number") or step
 
@@ -1982,8 +1969,6 @@ class MainView:
             if action_type == "key":
                 line += f" {result.get('key', '')}"
             self._log(line)
-            if observation:
-                self._log(f"  👁 {observation[:150]}")
             if reason:
                 self._log(f"  → {reason[:120]}")
 
@@ -2246,16 +2231,12 @@ class ReviewDialog:
             ),
             actions=[
                 ft.TextButton(
-                    "+ AI Verify",
-                    on_click=lambda e: self._add_ai_verify(),
-                ),
-                ft.TextButton(
                     "Cancel",
                     on_click=lambda e: self._close(),
                 ),
                 self.save_btn,
             ],
-            actions_alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            actions_alignment=ft.MainAxisAlignment.END,
         )
         self.page.open(self.dialog)
 
@@ -2325,8 +2306,6 @@ class ReviewDialog:
             return f"HOTKEY {'+'.join(step.get('keys', []))}"
         if action == "wait":
             return f"WAIT {step.get('delay', 0)}s"
-        if action == "ai_verify":
-            return f"AI VERIFY: {step.get('question', '')[:80]}"
         return action.upper()
 
     def _parameterize(self, idx: int):
@@ -2438,36 +2417,6 @@ class ReviewDialog:
     def _delete_step(self, idx: int):
         del self.steps[idx]
         self._render_steps()
-
-    def _add_ai_verify(self):
-        text_field = ft.TextField(
-            label="AI Verify question",
-            hint_text="Is the new patient form open?",
-            autofocus=True,
-            multiline=True,
-            min_lines=2, max_lines=3,
-        )
-
-        def on_ok(e):
-            q = (text_field.value or "").strip()
-            if q:
-                self.steps.append({"action": "ai_verify", "question": q})
-                self.page.close(ai_dlg)
-                self._render_steps()
-
-        def close_ai(e):
-            self.page.close(ai_dlg)
-
-        ai_dlg = ft.AlertDialog(
-            modal=True,
-            title=ft.Text("Add AI Verify"),
-            content=ft.Container(content=text_field, width=400),
-            actions=[
-                ft.TextButton("Cancel", on_click=close_ai),
-                ft.ElevatedButton("Add", on_click=on_ok),
-            ],
-        )
-        self.page.open(ai_dlg)
 
     def _update_inputs_label(self):
         if self.inputs_schema:
@@ -2591,7 +2540,7 @@ class SessionDetailDialog:
 
         d = self.detail
         sid = d.get("id", "")
-        display = d.get("flow_display_name") or d.get("flow_name") or d.get("task_description") or "Free-form"
+        display = d.get("flow_display_name") or d.get("flow_name") or "Untitled flow"
         pms = PMS_LABELS_LOOKUP.get(d.get("pms_software", ""), d.get("pms_software", ""))
         status = d.get("status", "")
         status_color = {

@@ -162,13 +162,12 @@ class BicentraAPI:
             return resp.json().get("flows", [])
         return []
 
-    def create_session(self, pms_software: str, task_description: str = "", flow_name: str = "", flow_inputs: dict | None = None):
-        """Start a new desktop automation session."""
+    def create_session(self, pms_software: str, flow_name: str, flow_inputs: dict | None = None):
+        """Start a new desktop automation session for a recorded flow."""
         url = f"{self.base_url}/api/desktop/sessions/create/"
         logger.debug(f"POST {url}")
         payload = {
             "pms_software": pms_software,
-            "task_description": task_description,
             "flow_name": flow_name,
             "flow_inputs": flow_inputs or {},
         }
@@ -179,51 +178,18 @@ class BicentraAPI:
         error = f"{resp.status_code} — {resp.text[:500]}"
         return None, error
 
-    def next_step(self, session_id: str, screenshot_b64: str | None = None, screen_width: int = 0, screen_height: int = 0, active_window: str = ""):
-        """Ask backend for the next action. Always sends screen size so backend can convert pct->pixels."""
+    def next_step(self, session_id: str, screen_width: int = 0, screen_height: int = 0):
+        """Ask backend for the next deterministic action. Screen size lets backend convert pct->pixels."""
         url = f"{self.base_url}/api/desktop/sessions/{session_id}/next/"
-        payload: dict = {
+        payload = {
             "screen_width": screen_width,
             "screen_height": screen_height,
-            "active_window_title": active_window,
         }
-        if screenshot_b64:
-            payload["screenshot"] = screenshot_b64
-        logger.debug(f"POST {url} (with_screenshot={bool(screenshot_b64)}, screen={screen_width}x{screen_height})")
-        resp = self.session.post(url, json=payload, headers=self._headers(), timeout=60)
+        logger.debug(f"POST {url} (screen={screen_width}x{screen_height})")
+        resp = self.session.post(url, json=payload, headers=self._headers(), timeout=30)
         self._log_request("POST", url, resp.status_code, resp.text)
         if resp.status_code == 200:
             return resp.json()
-        return None
-
-    def send_screenshot(
-        self,
-        session_id: str,
-        screenshot_b64: str,
-        screen_width: int,
-        screen_height: int,
-        active_window: str = "",
-    ) -> dict | None:
-        """Send a screenshot and get back the next action."""
-        url = f"{self.base_url}/api/desktop/sessions/{session_id}/screenshot/"
-        logger.debug(f"POST {url} (screenshot {len(screenshot_b64)} bytes, {screen_width}x{screen_height}, window: {active_window})")
-        resp = self.session.post(
-            url,
-            json={
-                "screenshot": screenshot_b64,
-                "screen_width": screen_width,
-                "screen_height": screen_height,
-                "active_window_title": active_window,
-            },
-            headers=self._headers(),
-            timeout=60,
-        )
-        self._log_request("POST", url, resp.status_code, resp.text)
-        if resp.status_code == 200:
-            data = resp.json()
-            logger.debug(f"  AI action: {data.get('action_type')} | observation: {str(data.get('ai_observation', ''))[:150]}")
-            return data
-        print(f"  Screenshot failed: {resp.status_code} {resp.text[:300]}")
         return None
 
     def cancel_session(self, session_id: str) -> bool:
