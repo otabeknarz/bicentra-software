@@ -1609,28 +1609,44 @@ class MainView:
     # Flow loading
     # ─────────────────────────────────────────────────────────
     def load_flows_async(self):
-        """Load the user's saved flows across all PMS (no filter)."""
-        # Show loading placeholder in the list area
+        """Load every available flow across every PMS.
+
+        The backend's `/api/desktop/flows/?pms=X` endpoint returns the
+        combined "available flows for PMS X" (system YAML flows + the org's
+        DB-saved flows scoped to that PMS), so we fan out across every PMS
+        we know about and dedupe by (name, pms). That way the Run page
+        shows the union of all flows the user could ever pick from.
+        """
         if self.flow_list_column:
             self.flow_list_column.controls.clear()
             self.flow_list_column.controls.append(ui.loading_state("Loading flows…"))
             self.page.update()
 
-        def fetch():
-            try:
-                flows = self.api.list_my_flows()
-            except Exception as e:
-                logger.error(f"list_my_flows failed: {e}")
-                flows = []
-            # Sort by display name for stable ordering
-            flows = sorted(
-                flows,
-                key=lambda f: (f.get("display_name") or f.get("name") or "").lower(),
+        def fetch_all():
+            all_flows: list[dict] = []
+            seen: set[tuple] = set()
+            for pms_key, _label in PMS_OPTIONS:
+                try:
+                    chunk = self.api.list_flows(pms_key) or []
+                except Exception as e:
+                    logger.error(f"list_flows({pms_key}) failed: {e}")
+                    chunk = []
+                for flow in chunk:
+                    # Backend may omit `pms` on individual rows; backfill it.
+                    if not flow.get("pms"):
+                        flow["pms"] = pms_key
+                    key = (flow.get("name"), flow.get("pms") or pms_key)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    all_flows.append(flow)
+            all_flows.sort(
+                key=lambda f: (f.get("display_name") or f.get("name") or "").lower()
             )
-            self.flows = flows
+            self.flows = all_flows
             self._render_flow_list()
 
-        threading.Thread(target=fetch, daemon=True).start()
+        threading.Thread(target=fetch_all, daemon=True).start()
 
     def _selected_flow(self) -> dict | None:
         return self.selected_flow
