@@ -812,9 +812,12 @@ class MainView:
         cleanly and the HTTP connection releases via the generator's finally."""
 
         def consume():
+            logger.info(f"workflow SSE: opening stream for {workflow_id}")
             stream = self.api.stream_workflow_events(workflow_id)
+            event_count = 0
             try:
                 for event in stream:
+                    event_count += 1
                     try:
                         self._handle_workflow_event(workflow_id, event)
                     except Exception as exc:
@@ -824,6 +827,9 @@ class MainView:
                     if event.get("kind") in self._AI_TERMINAL_KINDS:
                         break
             finally:
+                logger.info(
+                    f"workflow SSE: stream for {workflow_id} closed after {event_count} events"
+                )
                 try:
                     stream.close()
                 except Exception:
@@ -834,6 +840,10 @@ class MainView:
 
     def _handle_workflow_event(self, workflow_id: str, event: dict):
         kind = event.get("kind")
+        is_replay = bool(event.get("replay"))
+        logger.info(
+            f"workflow event: {kind} idx={event.get('index')} replay={is_replay}"
+        )
         if kind == "hello":
             self._ai_set_status(f"Connected. Status: {event.get('status')}")
         elif kind == "workflow_started":
@@ -848,7 +858,12 @@ class MainView:
             self._ai_log_step(event, status="skipped")
         elif kind == "desktop_action_required":
             self._ai_log_step(event, status="desktop")
-            self._handle_desktop_action(workflow_id, event)
+            # On reconnect / catch-up we replay the event but the desktop
+            # runner is already in flight (or finished) — re-firing it would
+            # spawn a duplicate flow runner thread. Live events always
+            # come without `replay`, so they still kick off normally.
+            if not is_replay:
+                self._handle_desktop_action(workflow_id, event)
         elif kind == "workflow_completed":
             self._ai_set_status("✓ Workflow completed.")
             self._ai_finish_run(local_status="completed")

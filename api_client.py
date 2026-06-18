@@ -472,6 +472,7 @@ class BicentraAPI:
         if resp.status_code != 200:
             self._log_request("GET", url, resp.status_code, resp.text[:300])
             return
+        logger.info(f"workflow SSE connected: {url}")
         try:
             for raw in resp.iter_lines(decode_unicode=True):
                 if not raw:
