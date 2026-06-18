@@ -3074,11 +3074,15 @@ class ReviewDialog:
         self.steps_column: ft.Column | None = None
         self.inputs_text: ft.Text | None = None
         self.save_btn: ft.ElevatedButton | None = None
+        self.error_text: ft.Text | None = None
 
     def show(self):
         self.steps_column = ft.Column(spacing=4, scroll=ft.ScrollMode.AUTO, height=360)
         self.inputs_text = ft.Text("Inputs: (none — flow has no variables)",
                                     size=11, color="#6b7280")
+        self.error_text = ft.Text(
+            "", size=11, color="#dc2626", visible=False, selectable=True,
+        )
         # Render steps AFTER inputs_text exists (it accesses inputs_text.value)
         self._render_steps()
 
@@ -3112,6 +3116,8 @@ class ReviewDialog:
                     ),
                     ft.Container(height=8),
                     self.inputs_text,
+                    ft.Container(height=4),
+                    self.error_text,
                 ], spacing=0),
                 width=600,
             ),
@@ -3312,6 +3318,7 @@ class ReviewDialog:
             self.inputs_text.value = "Inputs: (none — flow has no variables)"
 
     def _save(self):
+        logger.info(f"ReviewDialog._save: name={self.metadata.get('name')!r}")
         clean_steps = []
         for s in self.steps:
             clean = {k: v for k, v in s.items() if not k.startswith("_")}
@@ -3333,29 +3340,53 @@ class ReviewDialog:
 
         self.save_btn.disabled = True
         self.save_btn.text = "Saving..."
+        self._set_error("")
         self.page.update()
 
-        def do_save():
-            flow, error = self.api.create_flow(payload)
-            if flow:
-                self._close()
-                self.on_saved()
-            else:
+        def show_error(msg: str):
+            """Re-enable Save, surface the error inline on the dialog so
+            the operator can fix the issue and click Save again."""
+            try:
                 self.save_btn.disabled = False
                 self.save_btn.text = "💾 Save Flow"
+                self._set_error(msg)
+                self.page.update()
+            except Exception as exc:
+                logger.error(f"show_error itself crashed: {exc}", exc_info=True)
 
-                def close_err(e):
-                    self.page.close(err_dlg)
+        def do_save():
+            try:
+                flow, error = self.api.create_flow(payload)
+            except Exception as exc:
+                # api_client.create_flow should never raise — but if a future
+                # regression creeps in, this guard makes sure the user sees
+                # something instead of a stuck "Saving…" button.
+                logger.error(f"create_flow unexpected exception: {exc}", exc_info=True)
+                show_error(f"Unexpected error: {exc}")
+                return
 
-                err_dlg = ft.AlertDialog(
-                    modal=True,
-                    title=ft.Text("Save Failed"),
-                    content=ft.Text(str(error)),
-                    actions=[ft.TextButton("OK", on_click=close_err)],
-                )
-                self.page.open(err_dlg)
+            if flow:
+                logger.info(f"Flow saved: id={flow.get('id')} name={flow.get('name')!r}")
+                try:
+                    self._close()
+                except Exception as exc:
+                    logger.error(f"_close after save crashed: {exc}", exc_info=True)
+                try:
+                    self.on_saved()
+                except Exception as exc:
+                    logger.error(f"on_saved callback crashed: {exc}", exc_info=True)
+            else:
+                logger.warning(f"create_flow rejected: {error}")
+                show_error(error or "Unknown save failure")
 
         threading.Thread(target=do_save, daemon=True).start()
+
+    def _set_error(self, msg: str):
+        """Show/hide the inline error label inside the review dialog."""
+        if not getattr(self, "error_text", None):
+            return
+        self.error_text.value = msg
+        self.error_text.visible = bool(msg)
 
 
 # ════════════════════════════════════════════════════════════

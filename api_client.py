@@ -200,10 +200,18 @@ class BicentraAPI:
         return resp.status_code == 200
 
     def create_flow(self, flow_data: dict):
-        """Save a recorded flow to the backend DB."""
+        """Save a recorded flow to the backend DB. Always returns a 2-tuple —
+        never raises — so the caller can surface a clean error message in
+        the UI instead of crashing its worker thread."""
         url = f"{self.base_url}/api/desktop/flows-crud/"
-        logger.debug(f"POST {url}")
-        resp = self.session.post(url, json=flow_data, headers=self._headers())
+        logger.info(f"POST {url} (create_flow: {flow_data.get('name')!r})")
+        try:
+            resp = self.session.post(
+                url, json=flow_data, headers=self._headers(), timeout=30,
+            )
+        except requests.RequestException as exc:
+            logger.error(f"create_flow network error: {exc}")
+            return None, f"Network error — could not reach backend ({exc})"
         self._log_request("POST", url, resp.status_code, resp.text)
         if resp.status_code == 201:
             return resp.json(), None
