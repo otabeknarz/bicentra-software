@@ -1291,6 +1291,17 @@ class MainView:
         t.start()
         self._workflow_step_threads.append(t)
 
+    def _read_clipboard(self) -> str | None:
+        """Read the system clipboard. Returns None on any error (no clipboard
+        manager, permission denied, etc.) so callers can treat 'no value'
+        the same as 'failed to read'."""
+        try:
+            import pyperclip
+            return pyperclip.paste()
+        except Exception as exc:
+            logger.debug(f"clipboard read failed: {exc}")
+            return None
+
     def _run_workflow_flow_step(
         self,
         workflow_id: str,
@@ -1302,12 +1313,29 @@ class MainView:
     ):
         """Run a pre-created DesktopSession to completion (reuses the same
         next_step → execute_action loop the Run tab uses) and report the
-        outcome back to the workflow API."""
+        outcome back to the workflow API.
+
+        Also captures the clipboard before and after the flow so that flows
+        ending with a copy action (e.g. Sheets search + Ctrl+C) can hand
+        their output back to the backend agent as `result.clipboard` —
+        the agent then chains it into `extract_data` to pull structured
+        fields without us hard-coding output schemas per flow.
+        """
         import pyautogui
 
         screen_w, screen_h = pyautogui.size()
+        # Baseline so we only return the clipboard if the flow actually changed
+        # it — random text the operator had copied earlier shouldn't leak in.
+        clipboard_baseline = self._read_clipboard()
         result: dict = {"steps_executed": 0, "session_id": desktop_session_id}
         step = 0
+
+        def _attach_clipboard() -> None:
+            """Mutate `result` to include the flow's clipboard output, if any."""
+            final = self._read_clipboard()
+            if final and final != clipboard_baseline:
+                result["clipboard"] = final
+
         try:
             while True:
                 step += 1
@@ -1321,11 +1349,13 @@ class MainView:
                 if action_type == "done":
                     result["steps_executed"] = step - 1
                     result["final_reason"] = api_result.get("reason", "")
+                    _attach_clipboard()
                     self.api.post_workflow_step_result(
                         workflow_id, step_id, "completed", result=result
                     )
                     return
                 if action_type == "failed":
+                    _attach_clipboard()
                     self.api.post_workflow_step_result(
                         workflow_id, step_id, "failed",
                         result=result,
@@ -1336,6 +1366,7 @@ class MainView:
                 try:
                     execute_action(api_result)
                 except Exception as exc:
+                    _attach_clipboard()
                     self.api.post_workflow_step_result(
                         workflow_id, step_id, "failed",
                         result={**result, "steps_executed": step},
@@ -1345,6 +1376,7 @@ class MainView:
 
                 if step >= config.MAX_STEPS:
                     self.api.cancel_session(desktop_session_id)
+                    _attach_clipboard()
                     self.api.post_workflow_step_result(
                         workflow_id, step_id, "failed",
                         result={**result, "steps_executed": step},
@@ -1354,6 +1386,7 @@ class MainView:
                 time.sleep(config.SCREENSHOT_INTERVAL)
         except Exception as exc:
             logger.error(f"workflow flow step runner crashed: {exc}", exc_info=True)
+            _attach_clipboard()
             self.api.post_workflow_step_result(
                 workflow_id, step_id, "failed",
                 result=result,
