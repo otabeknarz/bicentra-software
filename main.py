@@ -309,6 +309,11 @@ class MainView:
         self.copy_btn: ft.IconButton | None = None
         self.run_idle_view: ft.Container | None = None  # shown when no flow selected
         self.run_active_view: ft.Container | None = None  # shown when flow selected
+        # Shared FilePicker for any flow input of type=file. Lives in
+        # page.overlay; routes its result to whichever input triggered it
+        # via self._file_picker_target.
+        self._file_picker: ft.FilePicker | None = None
+        self._file_picker_target: ft.TextField | None = None
 
         # Record tab widgets
         self.rec_pms: ft.Dropdown | None = None  # PMS picker lives inside Record tab now
@@ -366,6 +371,12 @@ class MainView:
             spacing=0,
             expand=True,
         )
+
+        # Shared FilePicker for file-typed flow inputs — must live in
+        # page.overlay so the native dialog can mount over the app window.
+        self._file_picker = ft.FilePicker(on_result=self._on_file_picked)
+        if self._file_picker not in self.page.overlay:
+            self.page.overlay.append(self._file_picker)
 
         return ft.Column([header, main_row], spacing=0, expand=True)
 
@@ -1729,6 +1740,30 @@ class MainView:
                 value=str(initial) if initial else "",
                 height=44,
             )
+        elif inp_type == "file":
+            # Render a path TextField + "Choose file…" button. When the user
+            # clicks the button, the shared FilePicker opens a native dialog,
+            # writes the selected absolute path back into the TextField.
+            path_field = ui.text_field(
+                label=label_text,
+                hint=placeholder or "/path/to/file",
+                value=str(initial) if initial else "",
+                height=44,
+            )
+            path_field.expand = True
+            choose_btn = ui.secondary_button(
+                "Choose file…",
+                on_click=lambda e, f=path_field: self._open_file_picker(f),
+                icon=ft.Icons.FOLDER_OPEN,
+            )
+            # The TextField is what we read .value off of in _collect_inputs,
+            # so map the input name to it (not the wrapping Row).
+            self.input_fields[name] = path_field
+            return ft.Row(
+                [path_field, choose_btn],
+                spacing=ui.SPACE_2,
+                vertical_alignment=ft.CrossAxisAlignment.END,
+            )
         else:  # string
             widget = ui.text_field(
                 label=label_text,
@@ -1739,6 +1774,33 @@ class MainView:
 
         self.input_fields[name] = widget
         return widget
+
+    def _open_file_picker(self, target_field: ft.TextField):
+        """Open the native file picker and route its result back to the
+        given TextField. The widget order is single-shot — clicking Choose…
+        again rewires the picker to whichever field requested it."""
+        self._file_picker_target = target_field
+        if self._file_picker is None:
+            # Shouldn't happen if build() registered it, but be defensive.
+            logger.warning("file picker not initialised; cannot open dialog")
+            return
+        self._file_picker.pick_files(
+            dialog_title="Choose a file",
+            allow_multiple=False,
+        )
+
+    def _on_file_picked(self, e):
+        """Callback for ft.FilePicker — write the selected path into the
+        TextField that triggered the dialog."""
+        if not self._file_picker_target:
+            return
+        files = getattr(e, "files", None) or []
+        if not files:
+            return
+        path = getattr(files[0], "path", None) or ""
+        if path:
+            self._file_picker_target.value = path
+            self.page.update()
 
     # ─────────────────────────────────────────────────────────
     # Record tab
@@ -3221,6 +3283,7 @@ class ReviewDialog:
                 ft.dropdown.Option(key="longtext", text="Multi-line text"),
                 ft.dropdown.Option(key="number", text="Number"),
                 ft.dropdown.Option(key="choice", text="Choice (dropdown)"),
+                ft.dropdown.Option(key="file", text="File (path)"),
             ],
         )
         default_field = ft.TextField(

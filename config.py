@@ -2,7 +2,7 @@ import os
 import logging
 
 # ── App identity ────────────────────────────────────────
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2.0"
 
 # ── Debug mode ──────────────────────────────────────────
 DEBUG = False #os.getenv("BICENTRA_DEBUG", "0") == "1"
