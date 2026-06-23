@@ -123,18 +123,31 @@ class Recorder:
             except Exception:
                 pass
 
+    # Anything shorter than this is treated as natural human rhythm (the
+    # tiny gap between a click and the next click) and isn't worth keeping.
+    # Anything longer is an intentional wait — the operator paused because
+    # the UI hadn't caught up yet — and replays need to honor it verbatim,
+    # so there's no upper cap.
+    MIN_RECORDED_GAP_SECS = 0.5
+
     def get_flow_steps(self) -> list[dict]:
-        """Convert recorded events into a flow step list."""
+        """Convert recorded events into a flow step list, preserving the
+        wait time the operator actually paused between each action so the
+        replay waits the same amount."""
         steps: list[dict] = []
         prev_time = None
 
         for ev in self.events:
-            # Optional wait step for long gaps (>1.5s)
-            if prev_time is not None and (ev.timestamp - prev_time) > 1.5:
-                steps.append({
-                    "action": "wait",
-                    "delay": round(min(ev.timestamp - prev_time, 3.0), 2),
-                })
+            if prev_time is not None:
+                gap = ev.timestamp - prev_time
+                if gap >= self.MIN_RECORDED_GAP_SECS:
+                    steps.append({
+                        "action": "wait",
+                        # Round to 0.1s — sub-100ms accuracy is noise, and
+                        # the cleaner number is what shows up in the
+                        # ReviewDialog ("WAIT 8.4s" beats "WAIT 8.37s").
+                        "delay": round(gap, 1),
+                    })
             prev_time = ev.timestamp
 
             if ev.kind == "click":
