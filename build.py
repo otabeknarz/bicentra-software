@@ -95,6 +95,28 @@ def _fvm_flutter_on_path() -> None:
 APP_BUILD_PATH = REPO / "build" / "macos" / f"{APP_NAME}.app"
 
 
+# Directories inside the repo that must NOT end up inside the packaged
+# Python app. Without an explicit exclude list, `flet build` snapshots
+# the entire working tree — that includes our previous DMG in dist/,
+# the fvm-managed Flutter SDK under .fvm/ (~700 MB), the git history,
+# and the pip build cache. Left unchecked, every rebuild inflates the
+# next .app by the size of the last one; two rebuilds in a row and
+# the .app crosses 4 GB.
+_PACKAGING_EXCLUDES = [
+    "build",           # Flet's own workspace + prior .app bundles
+    "dist",            # our packaged DMGs
+    ".fvm",            # pinned Flutter SDK (~700 MB)
+    ".git",            # repo history
+    "__pypackages__",  # pip build cache
+    ".vscode",
+    ".venv",
+    "venv",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".DS_Store",
+]
+
+
 def _flet_build_macos() -> None:
     _fvm_flutter_on_path()
     cmd = [
@@ -106,6 +128,7 @@ def _flet_build_macos() -> None:
         "--description", DESCRIPTION,
         "--org", ORG,
         "--skip-flutter-doctor",
+        "--exclude", *_PACKAGING_EXCLUDES,
     ]
     _run(cmd)
     if not APP_BUILD_PATH.exists():
@@ -221,6 +244,7 @@ def build_windows() -> None:
         "--description", DESCRIPTION,
         "--org", ORG,
         "--skip-flutter-doctor",
+        "--exclude", *_PACKAGING_EXCLUDES,
     ]
     _run(cmd)
     exe = REPO / "build" / "windows" / f"{APP_NAME}.exe"
