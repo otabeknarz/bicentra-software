@@ -351,26 +351,23 @@ class BicentraAPI:
             logger.error(f"report_action_executed failed: {e}")
             return False
 
-    def upload_session_video(
-        self, session_id: str, mp4_bytes: bytes, duration_ms: int | None = None
-    ) -> bool:
-        url = f"{self.base_url}/api/desktop/sessions/{session_id}/video/"
-        files = {"video": (f"session_{session_id}.mp4", mp4_bytes, "video/mp4")}
-        data = {}
-        if duration_ms is not None:
-            data["duration_ms"] = str(duration_ms)
-        headers = {}
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
+    def request_session_video(self, session_id: str, tier: str) -> bool:
+        """Ask the backend to render an MP4 slideshow from the screenshots we
+        already uploaded per action during the run. Returns True on 202.
+
+        `tier` is off / low / medium / high. `off` short-circuits on the
+        server without queuing anything, so it's safe to fire this every
+        time regardless of the operator's Settings choice."""
+        url = f"{self.base_url}/api/desktop/sessions/{session_id}/build-video/"
         try:
             resp = self.session.post(
-                url, files=files, data=data, headers=headers, timeout=120
+                url, json={"tier": tier}, headers=self._headers(), timeout=15,
             )
-            self._log_request("POST", url, resp.status_code, resp.text)
-            return resp.status_code in (200, 201)
         except requests.RequestException as e:
-            logger.error(f"upload_session_video failed: {e}")
+            logger.error(f"request_session_video failed: {e}")
             return False
+        self._log_request("POST", url, resp.status_code, resp.text)
+        return resp.status_code in (200, 202)
 
     # ──────────── Bicentra AI Workflows ────────────
     def create_workflow(self, prompt: str):

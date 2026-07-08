@@ -18,7 +18,6 @@ These are conservative; users can override.
 """
 
 import platform
-import subprocess
 from dataclasses import dataclass
 
 try:
@@ -133,21 +132,8 @@ def recommend_tier(info: SystemInfo | None = None) -> str:
 
 
 def has_hardware_h264() -> bool:
-    """Best-effort probe for whether ffmpeg can do hardware-accelerated H.264.
-
-    We only use this for advisory text in Settings; actual encoding still
-    falls back to libx264 (CPU) which is what imageio uses by default.
-    """
-    try:
-        from imageio_ffmpeg import get_ffmpeg_exe
-        ffmpeg = get_ffmpeg_exe()
-        out = subprocess.run(
-            [ffmpeg, "-hide_banner", "-encoders"],
-            capture_output=True, text=True, timeout=4,
-        ).stdout.lower()
-        for token in ("h264_videotoolbox", "h264_nvenc", "h264_qsv", "h264_amf"):
-            if token in out:
-                return True
-    except Exception:
-        pass
+    """Kept for API compatibility with the Settings tab, but always False now:
+    video encoding moved server-side in v0.3, so the desktop no longer ships
+    ffmpeg. The tier picker still exists (it controls fps + resolution the
+    backend renderer uses) but hardware detection isn't relevant here."""
     return False

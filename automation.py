@@ -6,7 +6,6 @@ import time
 import platform
 
 import pyautogui
-from PIL import Image
 
 # Safety: move mouse to top-left corner to abort
 pyautogui.FAILSAFE = True

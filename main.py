@@ -37,7 +37,13 @@ def _save_input_store(store: dict):
         pass
 from api_client import BicentraAPI
 from automation import take_screenshot_bytes, execute_action
-from video import build_slideshow
+# NOTE: video generation moved to the backend in v0.3 (see
+# desktop/tasks.py::build_session_video_task on the server). We used to build
+# an MP4 slideshow client-side with imageio-ffmpeg, but that pinned ~250 MB
+# of Python deps to the .app — worth stripping to keep the DMG in the
+# hundreds of MB range. The backend already has every per-action
+# screenshot uploaded via /actions/<id>/screenshot/, so it can render the
+# same slideshow on demand.
 from recorder import Recorder
 import windows as win_mod
 import system_info as sysinfo
@@ -232,8 +238,8 @@ class MainView:
         self.running = False
         self.session_id: str | None = None
         # In-memory cache of (step_number, png_bytes) for slideshow video
-        self._step_screenshots: list[tuple[int, bytes]] = []
-        self._max_screenshots = 200
+        # (No client-side slideshow frame buffer any more — see the
+        # top-of-file note. Backend renders from stored screenshots.)
 
         # Recording state
         self.recording = False
@@ -2808,55 +2814,21 @@ class MainView:
                 logger.error(f"background task failed: {fn.__name__}: {e}")
         threading.Thread(target=runner, daemon=True).start()
 
-    def _stash_screenshot(self, step_number: int, png_bytes: bytes):
-        """Cap memory: drop oldest if over budget."""
-        self._step_screenshots.append((step_number, png_bytes))
-        if len(self._step_screenshots) > self._max_screenshots:
-            self._step_screenshots.pop(0)
-
-    def _finalize_session_video(self, session_id: str, tier: str):
-        """Build a slideshow MP4 from cached frames, upload, then clear cache."""
-        frames = self._step_screenshots
-        if not frames or tier == sysinfo.TIER_OFF:
-            self._step_screenshots = []
-            return
-        params = sysinfo.tier_settings(tier)
-        fps = params.get("fps") or 2
-        max_size = params.get("max_size") or (1280, 720)
-        try:
-            t0 = time.monotonic()
-            mp4 = build_slideshow(frames, fps=fps, max_size=max_size)
-            duration_ms = int(len(frames) * 1000 / max(1, fps))
-            logger.debug(
-                f"Built slideshow video [{tier}]: {len(mp4)} bytes from "
-                f"{len(frames)} frames in {int((time.monotonic() - t0) * 1000)} ms"
-            )
-            if mp4:
-                self.api.upload_session_video(session_id, mp4, duration_ms=duration_ms)
-        except Exception as e:
-            logger.error(f"Failed to build/upload session video: {e}")
-        finally:
-            self._step_screenshots = []
+    # (Client-side slideshow encoding removed in v0.3 — the backend renders
+    # from per-action screenshots via /api/desktop/sessions/<id>/build-video/.)
 
     def _run_loop(self, pms_key, flow_name, inputs):
         import pyautogui
         screen_w, screen_h = pyautogui.size()
         self._debug_log(f"Screen size: {screen_w}x{screen_h}")
 
-        # Resolve recording tier from settings (per-machine).
+        # Resolve recording tier from settings (per-machine). The tier picks
+        # fps/resolution for the backend renderer; TIER_OFF also skips
+        # screenshot uploads entirely so we don't spend bandwidth just to
+        # tell the server "don't render a video."
         active_tier = settings_store.get_video_tier()
-        tier_params = sysinfo.tier_settings(active_tier)
         record_enabled = active_tier != sysinfo.TIER_OFF
-        self._max_screenshots = tier_params.get("max_frames", 200) or 200
-        self._debug_log(
-            f"Recording tier: {active_tier} "
-            f"(fps={tier_params.get('fps')}, "
-            f"max_size={tier_params.get('max_size')}, "
-            f"max_frames={self._max_screenshots})"
-        )
-
-        # Reset frame buffer for this run
-        self._step_screenshots = []
+        self._debug_log(f"Recording tier: {active_tier} (record_enabled={record_enabled})")
 
         session, error = self.api.create_session(
             pms_software=pms_key, flow_name=flow_name, flow_inputs=inputs,
@@ -2899,13 +2871,14 @@ class MainView:
             action_id = result.get("id")
             action_step = result.get("step_number") or step
 
-            # Upload screenshot for this action (fire-and-forget)
+            # Upload screenshot for this action (fire-and-forget). The backend
+            # keeps them attached to DesktopAction rows so it can rebuild the
+            # slideshow video later — no client-side frame buffer needed.
             if action_id and png_bytes:
                 self._fire_and_forget(
                     self.api.upload_action_screenshot,
                     self.session_id, action_id, png_bytes,
                 )
-                self._stash_screenshot(action_step, png_bytes)
 
             line = f"Step {step}: {action_type}"
             if action_type in ("click", "double_click", "right_click"):
@@ -2957,16 +2930,16 @@ class MainView:
                 self.api.cancel_session(self.session_id)
                 break
 
-        # Finalize: build slideshow video and upload (background thread).
-        # Even if run was cancelled or stopped, capture what we have.
+        # Ask the backend to render the slideshow video. Fire-and-forget:
+        # the render task queues on Celery, the History detail dialog picks
+        # up `session.video` when it lands. `off` short-circuits server-side
+        # so calling it every time is harmless.
         session_id_at_finalize = self.session_id
-        if session_id_at_finalize and record_enabled:
+        if session_id_at_finalize:
             self._fire_and_forget(
-                self._finalize_session_video, session_id_at_finalize, active_tier,
+                self.api.request_session_video,
+                session_id_at_finalize, active_tier,
             )
-        else:
-            # Drop any cached frames if recording is disabled
-            self._step_screenshots = []
 
         self._reset_run_ui()
 
