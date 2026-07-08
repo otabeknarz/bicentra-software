@@ -3173,11 +3173,25 @@ class ReviewDialog:
 
     def _render_steps(self):
         self.steps_column.controls.clear()
+        n = len(self.steps)
         for i, step in enumerate(self.steps):
             row_controls: list[ft.Control] = [
                 ft.Text(f"{i + 1}.", width=28, size=11, weight=ft.FontWeight.BOLD, color="#9ca3af"),
                 ft.Text(self._step_description(step), size=11, expand=True),
             ]
+            # Editing affordances vary by step type. Kept in a fixed right-
+            # aligned cluster so the row layout stays consistent across
+            # heterogeneous step lists.
+            if step.get("action") == "wait":
+                row_controls.append(
+                    ft.IconButton(
+                        icon=ft.Icons.TIMER,
+                        icon_size=16,
+                        icon_color="#1e40af",
+                        tooltip="Edit delay",
+                        on_click=lambda e, idx=i: self._edit_wait_delay(idx),
+                    )
+                )
             if step.get("action") == "type" and not step.get("_is_variable"):
                 row_controls.append(
                     ft.TextButton(
@@ -3186,11 +3200,34 @@ class ReviewDialog:
                         style=ft.ButtonStyle(color="#1e40af"),
                     )
                 )
+            # Reorder up / down. Disabled buttons still take space so the
+            # row heights don't jitter as you scroll the list.
+            row_controls.append(
+                ft.IconButton(
+                    icon=ft.Icons.KEYBOARD_ARROW_UP,
+                    icon_size=16,
+                    icon_color="#4b5563",
+                    tooltip="Move up",
+                    disabled=(i == 0),
+                    on_click=lambda e, idx=i: self._move_step(idx, -1),
+                )
+            )
+            row_controls.append(
+                ft.IconButton(
+                    icon=ft.Icons.KEYBOARD_ARROW_DOWN,
+                    icon_size=16,
+                    icon_color="#4b5563",
+                    tooltip="Move down",
+                    disabled=(i == n - 1),
+                    on_click=lambda e, idx=i: self._move_step(idx, 1),
+                )
+            )
             row_controls.append(
                 ft.IconButton(
                     icon=ft.Icons.CLOSE,
                     icon_size=16,
                     icon_color="#dc2626",
+                    tooltip="Delete step",
                     on_click=lambda e, idx=i: self._delete_step(idx),
                 )
             )
@@ -3207,6 +3244,66 @@ class ReviewDialog:
             self.page.update()
         except Exception:
             pass
+
+    def _move_step(self, idx: int, delta: int):
+        """Swap step at idx with its neighbour. delta is -1 (up) or +1 (down).
+        Silently no-ops at the edges; the buttons in _render_steps are already
+        disabled there but we double-check to survive stale click events."""
+        target = idx + delta
+        if target < 0 or target >= len(self.steps):
+            return
+        self.steps[idx], self.steps[target] = self.steps[target], self.steps[idx]
+        self._render_steps()
+
+    def _edit_wait_delay(self, idx: int):
+        """Small dialog to override the recorded wait duration in seconds.
+        Accepts anything parseable as a positive float, snaps to 0.1s to
+        match the resolution the recorder saves at, and rejects zero (a
+        zero-second wait is just a delete — use the trash icon)."""
+        if idx < 0 or idx >= len(self.steps):
+            return
+        step = self.steps[idx]
+        if step.get("action") != "wait":
+            return
+
+        field = ft.TextField(
+            label="Delay (seconds)",
+            value=str(step.get("delay", 0)),
+            autofocus=True,
+            border_radius=8,
+            height=44,
+            on_submit=lambda e: on_save(None),
+        )
+
+        def close(_=None):
+            self.page.close(dlg)
+
+        def on_save(_=None):
+            raw = (field.value or "").strip().replace(",", ".")
+            try:
+                secs = float(raw)
+            except ValueError:
+                field.error_text = "Enter a number (e.g. 2.5)"
+                self.page.update()
+                return
+            if secs <= 0:
+                field.error_text = "Must be > 0 — use the trash icon to delete instead"
+                self.page.update()
+                return
+            step["delay"] = round(secs, 1)
+            close()
+            self._render_steps()
+
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Edit wait step"),
+            content=ft.Container(content=field, width=320),
+            actions=[
+                ft.TextButton("Cancel", on_click=close),
+                ft.ElevatedButton("Save", on_click=on_save),
+            ],
+        )
+        self.page.open(dlg)
 
     def _step_description(self, step: dict) -> str:
         action = step.get("action", "?")
