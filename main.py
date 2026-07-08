@@ -44,7 +44,7 @@ from automation import take_screenshot_bytes, execute_action
 # hundreds of MB range. The backend already has every per-action
 # screenshot uploaded via /actions/<id>/screenshot/, so it can render the
 # same slideshow on demand.
-from recorder import Recorder
+from recorder import Recorder, STOP_HOTKEY_LABEL
 import windows as win_mod
 import system_info as sysinfo
 import settings_store
@@ -1876,7 +1876,7 @@ class MainView:
                 ft.Text("Record a Flow", size=14, weight=ft.FontWeight.BOLD),
                 ft.Text(
                     "Click Start, then perform the task in your PMS. "
-                    "Press ⌘+Shift+Esc or click Stop when done.",
+                    f"Press {STOP_HOTKEY_LABEL} or click Stop when done.",
                     size=11, color="#6b7280",
                 ),
                 ft.Container(height=8),

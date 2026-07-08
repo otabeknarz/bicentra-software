@@ -51,9 +51,16 @@ MODIFIER_KEYS = {
     keyboard.Key.cmd: "cmd", keyboard.Key.cmd_l: "cmd", keyboard.Key.cmd_r: "cmd",
 }
 
-# Stop recording with cmd/ctrl+shift+esc
-STOP_HOTKEY_KEYS = {"cmd", "shift"}
+# Stop recording with the platform's primary modifier + shift + esc.
+# On macOS that's ⌘⇧⎋; on Windows/Linux it's Ctrl+Shift+Esc. Ctrl+Shift+Esc
+# is Task Manager on Windows too — recording is short-lived and rare
+# enough that we accept the overlap. The corresponding UI label is built
+# by STOP_HOTKEY_LABEL below so both stay in sync.
+import platform as _platform
+_IS_MAC = _platform.system() == "Darwin"
+STOP_HOTKEY_KEYS = {"cmd", "shift"} if _IS_MAC else {"ctrl", "shift"}
 STOP_TRIGGER_KEY = keyboard.Key.esc
+STOP_HOTKEY_LABEL = "⌘+Shift+Esc" if _IS_MAC else "Ctrl+Shift+Esc"
 
 # Two clicks within this window → double-click
 DOUBLE_CLICK_WINDOW = 0.35  # seconds

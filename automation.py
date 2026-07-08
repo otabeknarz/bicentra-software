@@ -99,6 +99,19 @@ def execute_action(action: dict) -> None:
     elif action_type == "hotkey":
         keys = action.get("keys", [])
         if keys:
+            # Compatibility: a flow recorded on macOS carries "cmd" in its
+            # hotkey list, but pyautogui on Windows/Linux has no "cmd" key
+            # (the Command modifier doesn't exist there). Translate to
+            # "ctrl", which matches how nearly every macOS ⌘-shortcut maps
+            # to its Windows/Linux equivalent — ⌘F → Ctrl+F,
+            # ⌘C → Ctrl+C, and so on. Reverse translation (ctrl → cmd
+            # when replaying a Windows-recorded flow on macOS) uses the
+            # same idea. Not perfect for every shortcut, but covers the
+            # 90% case pharmacy staff actually record.
+            if platform.system() != "Darwin":
+                keys = ["ctrl" if k == "cmd" else k for k in keys]
+            else:
+                keys = ["cmd" if k == "ctrl" else k for k in keys]
             pyautogui.hotkey(*keys)
 
     elif action_type == "key":
